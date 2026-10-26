@@ -1,0 +1,41 @@
+<!-- app/web/templates/base.html -->
+<!-- Общий каркас интерфейса: локальные стили и модули, доступные диалоги и шапка. -->
+<!doctype html>
+{% from 'components/icons.html' import icon %}
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Сверка редакций документов</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script type="module" src="/static/js/app.js"></script>
+</head>
+<body class="page">
+  <header class="header">
+    <a class="header__brand" href="/" aria-label="Сверка редакций документов, главная"><span class="header__logo">≋</span><span>Сверка редакций документов</span></a>
+    <span class="header__section">✧ Анализ</span>
+    <nav class="header__menu" aria-label="Меню приложения">
+      <button class="button button--icon" type="button" data-help aria-label="Справка">{{ icon('help') }}</button>
+      <button class="button button--icon" type="button" data-notifications aria-label="Уведомления">{{ icon('bell') }}<span class="header__dot" data-notification-dot hidden></span></button>
+      <span class="header__guest">Гостевой режим<span>Без сохранения истории</span></span>
+    </nav>
+  </header>
+  <main class="page__content">{% block content %}{% endblock %}</main>
+  <dialog class="dialog" data-help-dialog>
+    <h2>Как сравнить документы</h2>
+    <p>Загрузите нашу редакцию и редакцию контрагента. Поддерживаются DOC, DOCX и PDF: до {{ max_file_mb }} МБ и {{ max_pages }} страниц на файл.</p>
+    <p>Сканы распознаются автоматически на русском и английском. Переключатель ИИ добавляет проверку корпоративной моделью и может увеличить время обработки.</p>
+    <p>Серым отмечены изменения, зелёным — добавления, пунктиром — непроверенные области. Выбор различия открывает соответствующие места обеих редакций.</p>
+    <p>«Завершено с предупреждениями» означает неполное покрытие. Отсутствие найденных отличий при таком статусе не подтверждает равенство документов.</p>
+    <p>Файлы удаляются через час после завершения. Итоговые документы скачиваются отдельными копиями. Криптографическая действительность подписей не проверяется.</p>
+    <form method="dialog"><button class="button button--primary">Понятно</button></form>
+  </dialog>
+  <dialog class="dialog" data-events-dialog>
+    <h2>События текущего задания</h2>
+    <ol class="dialog__events" data-events><li>Сравнение ещё не запускалось</li></ol>
+    <form method="dialog"><button class="button">Закрыть</button></form>
+  </dialog>
+  <div class="toast" role="alert" data-toast hidden></div>
+</body>
+</html>

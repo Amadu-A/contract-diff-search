@@ -218,3 +218,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Локальные договоры, результаты обработки и инструменты проверки.
+examples/
+.cache/
+.data/
+output/
+test-results/
+playwright-report/
+node_modules/
+.idea/

@@ -1,0 +1,21 @@
+<!-- app/web/templates/components/viewer.html -->
+<!-- Просмотрщик одной лениво загружаемой страницы с поиском и координатной подсветкой. -->
+{% from 'components/icons.html' import icon %}
+<section class="viewer" data-viewer="{{ side }}" aria-label="{{ title }}">
+  <header class="viewer__header"><span class="viewer__icon">{{ icon('file') }}</span><div><h2>{{ title }}</h2><p data-viewer-name>Документ не загружен</p></div><button class="button button--icon" type="button" data-rotate title="Повернуть страницу" aria-label="Повернуть страницу" disabled>↻</button></header>
+  <nav class="viewer__toolbar" aria-label="Навигация по документу">
+    <button class="button button--icon" type="button" data-page-prev aria-label="Предыдущая страница" disabled>‹</button>
+    <label class="viewer__page-label"><span class="visually-hidden">Страница</span><input class="viewer__page" type="number" value="1" min="1" data-page-number disabled></label><span data-page-count>/ —</span>
+    <button class="button button--icon" type="button" data-page-next aria-label="Следующая страница" disabled>›</button>
+    <button class="button button--icon" type="button" data-zoom-out aria-label="Уменьшить масштаб" disabled>−</button>
+    <label><span class="visually-hidden">Масштаб</span><select class="viewer__zoom" data-zoom disabled><option value="0.75">75%</option><option value="1" selected>100%</option><option value="1.25">125%</option><option value="1.5">150%</option><option value="2">200%</option></select></label>
+    <button class="button button--icon" type="button" data-zoom-in aria-label="Увеличить масштаб" disabled>+</button>
+    <button class="button button--icon" type="button" data-search-toggle aria-label="Найти текст" disabled>⌕</button>
+  </nav>
+  <form class="viewer__search" data-search-form hidden><label><span class="visually-hidden">Текст для поиска</span><input type="search" maxlength="120" placeholder="Найти в документе" data-search-input></label><button class="button" type="submit">Найти</button><button class="button button--icon" type="button" data-search-next aria-label="Следующее совпадение">›</button><span data-search-count></span></form>
+  <div class="viewer__viewport" data-viewport tabindex="0" aria-label="Область страницы">
+    <div class="viewer__empty" data-viewer-empty><span>▤</span><strong>Здесь появится документ</strong><p>Загрузите обе редакции<br>и запустите сравнение</p></div>
+    <div class="viewer__paper" data-paper hidden><img class="viewer__image" data-page-image alt="" decoding="async"><div class="viewer__regions" data-regions></div></div>
+  </div>
+  <footer class="viewer__exports"><a class="button" data-export-pdf aria-disabled="true">⇩ Скачать PDF с подсветкой</a><button class="button" type="button" data-export-word disabled title="Доступность будет проверена после анализа">▤ Скачать Word</button></footer>
+</section>

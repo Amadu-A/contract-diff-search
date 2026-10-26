@@ -1,0 +1,15 @@
+# .dockerignore
+# Конфиденциальные примеры и локальные секреты никогда не входят в build context.
+.git
+.env
+.venv
+.cache
+.data
+examples
+renders
+output
+node_modules
+test-results
+playwright-report
+**/__pycache__
+**/*.log

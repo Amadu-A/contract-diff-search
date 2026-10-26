@@ -1,0 +1,47 @@
+<!-- app/web/templates/pages/comparison.html -->
+<!-- Экран сверки по утверждённому PNG; результаты заполняются только реальным API. -->
+{% extends "base.html" %}
+{% block content %}
+<form class="comparison-form" data-comparison-form data-max-file-mb="{{ max_file_mb }}">
+  <div class="comparison-form__uploads">
+    {% set side='old' %}{% set title='Наша редакция' %}{% set symbol='♧' %}{% include 'components/upload.html' %}
+    {% set side='new' %}{% set title='Редакция контрагента' %}{% set symbol='▣' %}{% include 'components/upload.html' %}
+  </div>
+  <div class="comparison-form__actions">
+    <label class="toggle"><input class="toggle__input" type="checkbox" name="use_ai" data-ai><span class="toggle__track"></span><strong>Использовать ИИ</strong></label>
+    <p>Дополнительно проверяет смысловые изменения, перефразировки и скрытые правки <span title="Необязательная проверка корпоративной моделью">ⓘ</span></p>
+    <button class="button" type="button" data-reset>⟳ Сбросить</button>
+    <button class="button button--primary" type="submit" data-start disabled>✧ Сравнить документы</button>
+    <button class="button" type="button" data-cancel hidden>Отменить</button>
+  </div>
+</form>
+<div class="progress" role="status" aria-live="polite" data-progress hidden><span class="progress__spinner"></span><strong data-stage>В очереди</strong><span data-ai-status></span></div>
+<section class="statistics" aria-label="Статистика сравнения">
+  {% for key,title,subtitle,icon in [('total','Изменения','всего различий','▥'),('added','Добавлено','новых фрагментов','+'),('deleted','Удалено','фрагментов удалено','−'),('ambiguous','Неоднозначно','требует проверки','='),('unverified','Непроверенные области','возможны графика или сложное форматирование','⠿')] %}
+  <article class="stat stat--{{ key }}"><span class="stat__icon">{{ icon }}</span><div><h2>{{ title }}</h2><strong data-stat="{{ key }}">—</strong><p>{{ subtitle }}</p></div></article>
+  {% endfor %}
+</section>
+<aside class="warning" data-warning hidden><span class="warning__icon">⚠</span><strong>Есть непроверенные области</strong><p data-warning-text>Некоторые участки не удалось проверить автоматически. Просмотрите их вручную.</p><button class="button" type="button" data-show-unverified>◉ Показать области</button><button class="button button--icon" type="button" data-dismiss-warning aria-label="Закрыть предупреждение">×</button></aside>
+<section class="workspace" aria-label="Сравнение редакций">
+  <aside class="differences" aria-label="Найденные различия">
+    <header class="differences__header"><h2>Найденные различия <span data-list-count>0</span></h2><button class="button button--icon" type="button" data-filter-toggle aria-label="Фильтры">☷</button></header>
+    <form class="differences__filters" data-filters hidden><label>Категория<select data-category-filter><option value="">Все категории</option><option value="number_modified">Числа</option><option value="text_modified">Текст</option><option value="text_added">Добавления</option><option value="text_deleted">Удаления</option><option value="text_moved">Перемещения</option><option value="numbering_changed">Нумерация</option><option value="formatting_changed">Оформление</option><option value="structure_changed">Структура</option><option value="table_structure_changed">Таблицы</option><option value="graphic_added">Добавленная графика</option><option value="graphic_modified">Изменённая графика</option><option value="unverified_region">Непроверенные области</option><option value="ambiguous_match">Неоднозначные</option></select></label><label>Статус<select data-status-filter><option value="">Все статусы</option><option value="confirmed">Подтверждено</option><option value="unverified">Не проверено</option><option value="needs_review">Замечания ИИ</option></select></label></form>
+    <ol class="differences__list" data-differences><li class="differences__empty">Различия появятся после анализа документов</li></ol>
+    <button class="button differences__more" type="button" data-load-more hidden>Показать ещё</button>
+  </aside>
+  {% set side='old' %}{% set title='Наша версия' %}{% include 'components/viewer.html' %}
+  <button class="workspace__link" type="button" data-sync aria-pressed="true" title="Связанные переходы включены" aria-label="Синхронизация просмотрщиков">↔</button>
+  {% set side='new' %}{% set title='Версия контрагента' %}{% include 'components/viewer.html' %}
+  <aside class="details" aria-label="Детали изменения">
+    <header class="details__header"><h2>Детали изменения</h2><button class="button button--icon" type="button" data-diff-prev aria-label="Предыдущее изменение" disabled>‹</button><span data-detail-position>—</span><button class="button button--icon" type="button" data-diff-next aria-label="Следующее изменение" disabled>›</button></header>
+    <div class="details__empty" data-detail-empty>Выберите изменение в списке, чтобы увидеть подробности и соответствующие области.</div>
+    <article class="details__body" data-detail-body hidden>
+      <h3 data-detail-title></h3><p class="details__meta" data-detail-meta></p><span class="badge" data-detail-category></span><p class="details__reason" data-detail-reason></p>
+      <h4>Старая версия (наша)</h4><blockquote class="details__text" data-detail-old></blockquote><img class="details__image" data-detail-old-image alt="Графический фрагмент нашей редакции" hidden>
+      <h4>Новая версия (контрагент)</h4><blockquote class="details__text details__text--new" data-detail-new></blockquote><img class="details__image" data-detail-new-image alt="Графический фрагмент контрагента" hidden>
+      <p class="details__source" data-detail-source></p><button class="button" type="button" data-go-region>▤ Перейти к области</button>
+    </article>
+  </aside>
+</section>
+<footer class="retention"><span data-retention>◷ Файлы будут удалены через 1 час после завершения</span><button class="button button--quiet" type="button" data-delete hidden>Удалить сейчас</button></footer>
+{% endblock %}

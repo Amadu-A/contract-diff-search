@@ -1,0 +1,92 @@
+# compose.yaml
+# Процессы одного монолита; RabbitMQ и VLM принадлежат shared-infrastructure.
+name: contract-diff-search
+
+x-app: &app
+  build:
+    context: .
+    target: runtime
+  image: contract-diff-search:local
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 160
+  env_file:
+    - path: .env.example
+      required: true
+    - path: .env
+      required: false
+  environment:
+    RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-}
+    RABBITMQ_CONTAINER: ${RABBITMQ_CONTAINER:-shared-rabbitmq-1}
+    RABBITMQ_HOST: ${RABBITMQ_HOST:-rabbitmq}
+    RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
+    RABBITMQ_USER: ${RABBITMQ_USER:-contract-diff}
+    RABBITMQ_VHOST: ${RABBITMQ_VHOST:-contract-diff}
+    APP_PORT: ${APP_PORT:-8080}
+    DATA_DIR: /srv/app/.data
+    PROCESS_TEMP_DIR: /tmp/processes
+    HOME: /tmp/contract-diff
+  volumes:
+    - temporary-data:/srv/app/.data
+  tmpfs:
+    - /tmp:size=1g,uid=10001,gid=10001,mode=1770
+  logging:
+    driver: local
+    options:
+      max-size: "10m"
+      max-file: "3"
+  networks: [default, ai-shared]
+  stop_grace_period: 30s
+
+services:
+  api:
+    <<: *app
+    ports: ["${APP_BIND_IP:-127.0.0.1}:${APP_PORT:-8080}:${APP_PORT:-8080}"]
+    cpus: 2
+    mem_limit: 2g
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; from app.settings import Settings; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % Settings().app_port, timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+  worker:
+    <<: *app
+    command: [python, -m, app.worker]
+    cpus: 2
+    mem_limit: 3g
+    healthcheck:
+      test: [CMD, celery, -A, app.worker:celery_app, inspect, ping, --timeout=5]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+  tests:
+    build:
+      context: .
+      target: test
+    profiles: [test]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=2g,uid=10001,gid=10001,mode=1770
+      - /srv/app/.cache:size=200m,uid=10001,gid=10001,mode=1770
+    environment:
+      DATA_DIR: /tmp/test-data
+      PROCESS_TEMP_DIR: /tmp/processes
+      HOME: /tmp/contract-diff
+    mem_limit: 3g
+    cpus: 2
+
+volumes:
+  temporary-data:
+
+networks:
+  default:
+    internal: true
+  ai-shared:
+    external: true
+    name: ai-shared

@@ -1,0 +1,10 @@
+/* app/web/static/css/style.css */
+/* Единственная точка входа модульных стилей интерфейса сверки. */
+@import url('./variables.css');
+@import url('./global.css');
+@import url('./blocks/header.css');
+@import url('./blocks/upload.css');
+@import url('./blocks/statistics.css');
+@import url('./blocks/workspace.css');
+@import url('./blocks/viewer.css');
+@import url('./responsive.css');

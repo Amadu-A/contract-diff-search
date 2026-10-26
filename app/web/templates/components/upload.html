@@ -1,0 +1,19 @@
+<!-- app/web/templates/components/upload.html -->
+<!-- Одинаковая доступная карточка загрузки для каждой редакции. -->
+{% from 'components/icons.html' import icon %}
+<section class="upload" data-upload="{{ side }}">
+  <h2 class="upload__heading"><span class="upload__symbol">{{ icon('our' if side == 'old' else 'partner') }}</span>{{ title }}</h2>
+  <div class="upload__body">
+    <div class="upload__file" data-file-info>
+      <span class="upload__file-icon" data-file-icon>{{ icon('file') }}</span>
+      <div class="upload__metadata"><strong data-file-name>Файл не выбран</strong><small data-file-meta>DOC · DOCX · PDF, до {{ max_file_mb }} МБ</small></div>
+      <button class="button button--icon" type="button" data-remove-file aria-label="Удалить файл: {{ title }}" hidden>×</button>
+    </div>
+    <label class="upload__drop" data-drop>
+      <span class="upload__cloud" aria-hidden="true">{{ icon('upload') }}</span>
+      <span>Перетащите файл сюда<br><small>или нажмите для выбора</small></span>
+      <input class="upload__input" type="file" name="{{ side }}" accept=".doc,.docx,.pdf" data-file-input aria-label="{{ title }}">
+    </label>
+  </div>
+  <p class="upload__error" data-file-error role="alert" hidden></p>
+</section>

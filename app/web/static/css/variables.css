@@ -1,0 +1,3 @@
+/* app/web/static/css/variables.css */
+/* Цвета и размеры утверждённого светлого интерфейса. */
+:root{--bg:#f0f5f9;--paper:#fff;--text:#17233d;--muted:#7183a1;--line:#e3ebf4;--blue:#2879ff;--blue-soft:#eaf2ff;--green:#14ad79;--gray-highlight:rgba(110,125,143,.29);--radius:12px;--shadow:0 5px 22px #536b8b0a;--font:Inter,"Segoe UI",Arial,sans-serif}

@@ -1,0 +1,6 @@
+# .gitattributes
+# Единые переводы строк, включая запуск shell-скриптов на Linux.
+* text=auto eol=lf
+*.png binary
+*.pdf binary
+*.docx binary

@@ -1,0 +1,3 @@
+<!-- app/web/templates/components/icons.html -->
+<!-- Переиспользуемое подключение локального SVG-значка; доступное имя задаёт кнопка. -->
+{% macro icon(name) -%}<svg class="icon" aria-hidden="true" focusable="false"><use href="/static/icons.svg#{{ name }}"></use></svg>{%- endmacro %}

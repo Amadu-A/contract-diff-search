@@ -1,0 +1,20 @@
+# .github/workflows/check.yml
+# Обезличенные тесты CI с реальными системными инструментами и проверками границ.
+name: quality-and-tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y libreoffice-writer tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng fonts-liberation
+      - run: uv sync --frozen
+      - run: uv run --frozen playwright install --with-deps chromium
+      - run: bash scripts/check-quality.sh
+      - run: uv run --frozen pytest -q -m 'not real and not external' --cov=app --cov-branch --cov-report=xml
+      - run: node --test tests/frontend/*.test.js
