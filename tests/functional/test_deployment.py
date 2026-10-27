@@ -1,7 +1,7 @@
 # tests/functional/test_deployment.py
 """Проверки однокомандного запуска с изолированным состоянием общего RabbitMQ.
 
-Вместо Docker используется временная исполняемая команда. Реальные контейнеры,
+Вместо Docker используется функция Bash, читающая временный Python-файл. Реальные контейнеры,
 пользователи и секреты оператора не читаются и не изменяются.
 """
 
@@ -125,13 +125,11 @@ def mock_docker_main() -> int:
 
 @pytest.fixture
 def deployment(tmp_path):
-    """Подключает временную mock-команду в PATH и предоставляет запуск настоящего up.sh."""
+    """Подключает подмену через BASH_ENV, включая временный каталог с запретом исполнения."""
     git_bash = Path("C:/Program Files/Git/bin/bash.exe")
     bash = str(git_bash) if git_bash.exists() else shutil.which("bash")
     if bash is None:
         pytest.skip("Для проверки scripts/up.sh требуется Bash")
-    directory = tmp_path / "mock-bin"
-    directory.mkdir()
     mock = tmp_path / "mock_docker.py"
     mock.write_text(
         "import hashlib, json, os, sys\nfrom pathlib import Path\n"
@@ -141,17 +139,18 @@ def deployment(tmp_path):
         encoding="utf-8",
         newline="\n",
     )
-    launcher = directory / "docker"
-    launcher.write_text(
-        "#!/usr/bin/env bash\nexec "
+    mock.chmod(0o600)
+    hook = tmp_path / "mock_env.sh"
+    hook.write_text(
+        "docker() {\n  "
         + shlex.quote(Path(sys.executable).as_posix())
         + " "
         + shlex.quote(mock.as_posix())
-        + ' --mock-docker "$@"\n',
+        + ' --mock-docker "$@"\n}\n',
         encoding="utf-8",
         newline="\n",
     )
-    launcher.chmod(0o700)
+    hook.chmod(0o600)
     repository = tmp_path / "repository"
     (repository / "scripts").mkdir(parents=True)
     shutil.copyfile(ROOT / "scripts/up.sh", repository / "scripts/up.sh")
@@ -177,8 +176,9 @@ def deployment(tmp_path):
     def run(trace=False):
         """Выполняет Bash без использования пользовательского Docker и возвращает новый state."""
         state_path.write_text(json.dumps(state), encoding="utf-8")
+        journal_start = len(state["journal"])
         environment = dict(os.environ)
-        environment["PATH"] = str(directory) + os.pathsep + environment["PATH"]
+        environment["BASH_ENV"] = hook.as_posix()
         environment["CONTRACT_DIFF_MOCK_STATE"] = str(state_path)
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["MSYS2_ARG_CONV_EXCL"] = "*"
@@ -194,6 +194,10 @@ def deployment(tmp_path):
         )
         state.clear()
         state.update(json.loads(state_path.read_text(encoding="utf-8")))
+        events = state["journal"][journal_start:]
+        assert events and events[0]["args"] == ["info"], (
+            "Не сработала тестовая подмена Docker; проверка сценария недействительна"
+        )
         assert PASSWORD.rstrip() not in completed.stdout + completed.stderr
         assert all(
             PASSWORD.rstrip() not in arg for event in state["journal"] for arg in event["args"]
@@ -266,6 +270,7 @@ def test_wrong_password_does_not_change_user_or_start_service(deployment):
     assert state["mutations"] == []
     assert state["up_count"] == 0
     assert state["users"][USER]["password"] == "existing-different-password"
+    assert command_names(state)[-1] == "authenticate_user"
     assert "change_password" not in command_names(state)
 
 
@@ -282,6 +287,7 @@ def test_rabbitmq_read_failure_is_not_treated_as_missing_record(deployment, comm
     assert completed.returncode != 0
     assert state["mutations"] == []
     assert state["up_count"] == 0
+    assert command_names(state)[-1] == command
 
 
 @pytest.mark.parametrize("tags", ["[administrator]", "[management]", "[monitoring, policymaker]"])
@@ -295,6 +301,7 @@ def test_privileged_existing_user_is_rejected(deployment, tags):
     assert state["mutations"] == []
     assert state["up_count"] == 0
     assert state["users"][USER]["tags"] == tags
+    assert command_names(state)[-1] == "list_users"
 
 
 def test_user_with_permissions_in_foreign_vhost_is_rejected(deployment):
@@ -307,6 +314,7 @@ def test_user_with_permissions_in_foreign_vhost_is_rejected(deployment):
     assert state["mutations"] == []
     assert state["up_count"] == 0
     assert state["vhosts"]["other-project"][USER] == [".*", ".*", ".*"]
+    assert command_names(state)[-1] == "list_user_permissions"
 
 
 @pytest.mark.parametrize(

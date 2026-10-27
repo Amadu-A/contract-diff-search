@@ -12,7 +12,11 @@ $taskExit = $LASTEXITCODE
 Get-Content .cache/tests-windows.log -Tail 25
 if ($taskExit -ne 0) { exit $taskExit }
 $taskFrontendTests = @(Get-ChildItem tests/frontend/*.test.js | ForEach-Object { $_.FullName })
-node --test @taskFrontendTests *> .cache/tests-frontend.log
-$taskExit = $LASTEXITCODE
+$taskConsoleEncoding = [Console]::OutputEncoding
+try {
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+    node --test --test-reporter=tap @taskFrontendTests *> .cache/tests-frontend.log
+    $taskExit = $LASTEXITCODE
+} finally { [Console]::OutputEncoding = $taskConsoleEncoding }
 Get-Content .cache/tests-frontend.log -Tail 8
 if ($taskExit -ne 0) { exit $taskExit }
