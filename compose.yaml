@@ -21,11 +21,13 @@ x-app: &app
   environment:
     RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-}
     RABBITMQ_CONTAINER: ${RABBITMQ_CONTAINER:-shared-rabbitmq-1}
+    RABBITMQ_CLI_TIMEOUT_SECONDS: ${RABBITMQ_CLI_TIMEOUT_SECONDS:-30}
     RABBITMQ_HOST: ${RABBITMQ_HOST:-rabbitmq}
     RABBITMQ_PORT: ${RABBITMQ_PORT:-5672}
     RABBITMQ_USER: ${RABBITMQ_USER:-contract-diff}
     RABBITMQ_VHOST: ${RABBITMQ_VHOST:-contract-diff}
-    APP_PORT: ${APP_PORT:-8080}
+    APP_BIND_IP: ${APP_BIND_IP:-192.168.55.3}
+    APP_PORT: ${APP_PORT:-8082}
     DATA_DIR: /srv/app/.data
     PROCESS_TEMP_DIR: /tmp/processes
     HOME: /tmp/contract-diff
@@ -44,7 +46,7 @@ x-app: &app
 services:
   api:
     <<: *app
-    ports: ["${APP_BIND_IP:-127.0.0.1}:${APP_PORT:-8080}:${APP_PORT:-8080}"]
+    ports: ["${APP_BIND_IP:-192.168.55.3}:${APP_PORT:-8082}:${APP_PORT:-8082}"]
     cpus: 2
     mem_limit: 2g
     healthcheck:

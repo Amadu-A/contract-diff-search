@@ -7,14 +7,15 @@
 
 import re
 import sys
+from ipaddress import ip_address
 
 from pydantic import ValidationError
 
 from app.settings import Settings
 
 
-def bootstrap_values(settings: Settings) -> tuple[str, str, str, str]:
-    """Проверяет отдельную учётную запись и возвращает четыре строки закрытого протокола."""
+def bootstrap_values(settings: Settings) -> tuple[str, str, str, str, str, str]:
+    """Проверяет учётную запись и возвращает настройки с пределом ожидания CLI."""
     container, user, vhost = (
         settings.rabbitmq_container,
         settings.rabbitmq_user,
@@ -32,7 +33,22 @@ def bootstrap_values(settings: Settings) -> tuple[str, str, str, str]:
     password = settings.rabbitmq_password.get_secret_value()
     if not password or len(password.encode("utf-8")) > 1024 or any(c in password for c in "\r\n\0"):
         raise ValueError("Запишите непустой однострочный RABBITMQ_PASSWORD в .env")
-    return container, user, vhost, password
+    try:
+        host = str(ip_address(settings.app_bind_ip))
+    except ValueError:
+        raise ValueError("APP_BIND_IP должен содержать IP-адрес публикации сервиса") from None
+    if host in {"0.0.0.0", "::"}:
+        host = "localhost"
+    if ":" in host:
+        host = f"[{host}]"
+    return (
+        container,
+        user,
+        vhost,
+        password,
+        str(settings.rabbitmq_cli_timeout_seconds),
+        f"http://{host}:{settings.app_port}",
+    )
 
 
 def main() -> int:

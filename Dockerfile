@@ -15,7 +15,7 @@ COPY --chown=app:app app ./app
 COPY --chown=app:app .env.example pyproject.toml ./
 RUN mkdir -p /srv/app/.data && chown app:app /srv/app/.data
 USER app
-EXPOSE 8080
+EXPOSE 8082
 CMD ["python", "-m", "app"]
 
 FROM runtime AS test

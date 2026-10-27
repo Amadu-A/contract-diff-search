@@ -24,6 +24,8 @@ def test_bootstrap_settings_layers_and_literal_secret(tmp_path, monkeypatch):
         "contract-diff",
         "contract-diff",
         "literal-$(whoami)-$HOME-#-! value",
+        "30",
+        "http://192.168.55.3:8082",
     )
 
 
@@ -37,6 +39,7 @@ def test_bootstrap_settings_layers_and_literal_secret(tmp_path, monkeypatch):
         ("rabbitmq_user", "bad user"),
         ("rabbitmq_vhost", "/"),
         ("rabbitmq_vhost", "--help"),
+        ("app_bind_ip", "invalid-address"),
         ("rabbitmq_password", ""),
         ("rabbitmq_password", "secret\nsecond-line"),
         ("rabbitmq_password", "secret\rsecond-line"),
@@ -82,3 +85,19 @@ def test_bootstrap_validation_error_hides_inputs(monkeypatch, capsys):
     assert captured.out == ""
     assert "synthetic-private-input" not in captured.err
     assert "Некорректные настройки" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("bind_ip", "port", "expected"),
+    [
+        ("192.168.55.3", 8082, "http://192.168.55.3:8082"),
+        ("127.0.0.1", 18082, "http://127.0.0.1:18082"),
+        ("0.0.0.0", 8082, "http://localhost:8082"),
+    ],
+)
+def test_bootstrap_shows_configured_public_address(bind_ip, port, expected):
+    """Финальный адрес запуска соответствует настройкам IP и порта, включая переопределения."""
+    settings = Settings(
+        _env_file=None, rabbitmq_password="synthetic", app_bind_ip=bind_ip, app_port=port
+    )
+    assert provisioning.bootstrap_values(settings)[-1] == expected

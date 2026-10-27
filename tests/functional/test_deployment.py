@@ -29,7 +29,19 @@ def mock_docker_main() -> int:
     state_path = Path(os.environ["CONTRACT_DIFF_MOCK_STATE"])
     state = json.loads(state_path.read_text(encoding="utf-8"))
     args = sys.argv[2:]
-    password = sys.stdin.read().removesuffix("\n") if "-i" in args else ""
+    tool = sys.argv[1]
+    if tool != "--mock-docker":
+        code = (
+            int(state.get("lock_busy", False))
+            if tool == "--mock-flock"
+            else state.get("quality_exit", 0)
+        )
+        state.setdefault("tools", []).append(tool)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        if tool == "--mock-uv":
+            print("QUALITY_DETAIL_FIRST\n" + "quality progress\n" * 12)
+        return code
+    password = sys.stdin.read() if "-i" in args else ""
     event = {"args": args}
     if "-i" in args:
         event["stdin_sha256"] = hashlib.sha256(password.encode()).hexdigest()
@@ -50,22 +62,47 @@ def mock_docker_main() -> int:
             code = 0 if state["compose_config"] else 1
         elif "build" in args:
             state["built"] = True
+            output = "BUILD_DETAIL_FIRST\nImage test-app Built"
         elif "run" in args:
-            assert state["built"], "Образ должен быть собран перед чтением Settings"
-            code = 1 if state.get("bootstrap_error") else 0
-            output = "\n".join(state["config"]) if code == 0 else ""
+            if "app.provisioning" in args:
+                assert state["built"], "Образ должен быть собран перед чтением Settings"
+                code = 1 if state.get("bootstrap_error") else 0
+                output = "\n".join(state["config"]) if code == 0 else ""
+            else:
+                assert "tests" in args
+                output = "TEST_DETAIL_FIRST\n" + "test progress\n" * 15 + "tests passed"
+                code = state.get("container_tests_exit", 0)
         elif "up" in args:
             state["up_count"] += 1
         elif "ps" not in args:
             code = 1
     elif args and args[0] == "exec":
-        position = 2 if args[1] == "-i" else 1
-        assert args[position] == CONTAINER, "Нельзя обращаться к чужому контейнеру"
-        ctl = args[args.index("rabbitmqctl") + 1 :]
-        while ctl and ctl[0].startswith("--"):
-            count = 2 if ctl[0] == "--timeout" else 1
-            ctl = ctl[count:]
-        command, values = ctl[0], ctl[1:]
+        assert args[args.index("timeout") - 1] == CONTAINER
+        assert "--user" in args and args[args.index("--user") + 1] == "rabbitmq"
+        if "rabbitmqctl" in args:
+            ctl = args[args.index("rabbitmqctl") + 1 :]
+            while ctl and ctl[0].startswith("--"):
+                count = 2 if ctl[0] == "--timeout" else 1
+                ctl = ctl[count:]
+            command, values = ctl[0], ctl[1:]
+        else:
+            script = args[args.index("-c") + 1]
+            assert "cat >" in script and "/dev/shm/contract-diff-password" in script
+            assert "trap" in script and "timeout" in script
+            expression, user = args[-2:]
+            command = (
+                "add_user"
+                if "rabbit_auth_backend_internal:add_user" in expression
+                else "authenticate_user"
+            )
+            assert "file:read_file(_2)" in expression
+            values = [user]
+        event["operation"] = command
+        if command == state.get("hang_command"):
+            import time
+
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            time.sleep(60)
         if command in state["fail_commands"]:
             code = 1
         elif command == "list_users":
@@ -141,19 +178,21 @@ def deployment(tmp_path):
     )
     mock.chmod(0o600)
     hook = tmp_path / "mock_env.sh"
+    launcher = shlex.quote(Path(sys.executable).as_posix()) + " " + shlex.quote(mock.as_posix())
     hook.write_text(
-        "docker() {\n  "
-        + shlex.quote(Path(sys.executable).as_posix())
-        + " "
-        + shlex.quote(mock.as_posix())
-        + ' --mock-docker "$@"\n}\n',
+        "\n".join(
+            f'{name}() {{ {launcher} --mock-{name} "$@"; }}'
+            for name in ("docker", "flock", "uv", "git")
+        )
+        + "\n",
         encoding="utf-8",
         newline="\n",
     )
     hook.chmod(0o600)
     repository = tmp_path / "repository"
     (repository / "scripts").mkdir(parents=True)
-    shutil.copyfile(ROOT / "scripts/up.sh", repository / "scripts/up.sh")
+    for name in ("up.sh", "test.sh", "check-quality.sh"):
+        shutil.copyfile(ROOT / "scripts" / name, repository / "scripts" / name)
     (repository / ".env.example").write_text("RABBITMQ_PASSWORD=\n", encoding="utf-8")
     (repository / ".env").write_text("RABBITMQ_PASSWORD=mock-only\n", encoding="utf-8")
     state_path = tmp_path / "state.json"
@@ -164,7 +203,8 @@ def deployment(tmp_path):
         "running": True,
         "compose_config": True,
         "built": False,
-        "config": [CONTAINER, USER, VHOST, PASSWORD],
+        "config": [CONTAINER, USER, VHOST, PASSWORD, "30", "http://192.168.55.3:8082"],
+        "repository": str(repository),
         "users": {},
         "vhosts": {"/": {}},
         "fail_commands": [],
@@ -173,7 +213,7 @@ def deployment(tmp_path):
         "up_count": 0,
     }
 
-    def run(trace=False):
+    def run(trace=False, script="up.sh", arguments=()):
         """Выполняет Bash без использования пользовательского Docker и возвращает новый state."""
         state_path.write_text(json.dumps(state), encoding="utf-8")
         journal_start = len(state["journal"])
@@ -183,7 +223,12 @@ def deployment(tmp_path):
         environment["PYTHONIOENCODING"] = "utf-8"
         environment["MSYS2_ARG_CONV_EXCL"] = "*"
         completed = subprocess.run(
-            [bash, *(["-x"] if trace else []), (repository / "scripts/up.sh").as_posix()],
+            [
+                bash,
+                *(["-x"] if trace else []),
+                (repository / "scripts" / script).as_posix(),
+                *arguments,
+            ],
             cwd=repository,
             env=environment,
             capture_output=True,
@@ -195,9 +240,12 @@ def deployment(tmp_path):
         state.clear()
         state.update(json.loads(state_path.read_text(encoding="utf-8")))
         events = state["journal"][journal_start:]
-        assert events and events[0]["args"] == ["info"], (
-            "Не сработала тестовая подмена Docker; проверка сценария недействительна"
-        )
+        if script != "check-quality.sh":
+            assert state.get("lock_busy") or events, (
+                "Не сработала тестовая подмена Docker; проверка сценария недействительна"
+            )
+        if script == "up.sh" and not state.get("lock_busy"):
+            assert events[0]["args"] == ["info"]
         assert PASSWORD.rstrip() not in completed.stdout + completed.stderr
         assert all(
             PASSWORD.rstrip() not in arg for event in state["journal"] for arg in event["args"]
@@ -215,11 +263,7 @@ def configured(state):
 
 def command_names(state):
     """Извлекает выполненные RabbitMQ-команды из журнала без чтения секретов."""
-    return [
-        args[args.index("rabbitmqctl") + 4]
-        for event in state["journal"]
-        if "rabbitmqctl" in (args := event["args"])
-    ]
+    return [event["operation"] for event in state["journal"] if "operation" in event]
 
 
 def test_first_start_and_repeat_are_idempotent(deployment):
@@ -227,6 +271,10 @@ def test_first_start_and_repeat_are_idempotent(deployment):
     state, run = deployment
     first = run()
     assert first.returncode == 0, first.stderr
+    assert "BUILD_DETAIL_FIRST" in first.stdout
+    assert "Создание пользователя RabbitMQ" in first.stdout
+    assert "Проверка пароля RabbitMQ" in first.stdout
+    assert "http://192.168.55.3:8082" in first.stdout
     assert state["users"][USER] == {"password": PASSWORD, "tags": "[]"}
     assert state["vhosts"][VHOST][USER] == [".*", ".*", ".*"]
     assert state["mutations"] == ["add_user", "add_vhost", "set_permissions"]
@@ -330,4 +378,80 @@ def test_missing_dependencies_stop_before_broker_mutation(deployment, failure):
     completed = run()
     assert completed.returncode != 0
     assert state["mutations"] == []
+    assert state["up_count"] == 0
+
+
+def test_concurrent_deploy_is_rejected_before_docker(deployment):
+    """Не запускает второй deploy, когда другой процесс удерживает блокировку."""
+    state, run = deployment
+    state["lock_busy"] = True
+    completed = run()
+    assert completed.returncode != 0
+    assert state["journal"] == []
+    assert "Уже выполняется другой" in completed.stderr
+
+
+def test_deploy_log_is_explicit_and_stages_stay_visible(deployment):
+    """Только --log скрывает подробности сборки; текущий шаг всё равно виден."""
+    state, run = deployment
+    completed = run(arguments=("--log",))
+    assert completed.returncode == 0, completed.stderr
+    assert "BUILD_DETAIL_FIRST" not in completed.stdout
+    assert "Создание пользователя RabbitMQ" in completed.stdout
+    log = Path(state["repository"]) / ".cache/deploy.log"
+    assert "BUILD_DETAIL_FIRST" in log.read_text(encoding="utf-8")
+    assert PASSWORD not in log.read_text(encoding="utf-8")
+
+
+def test_rejected_deploy_keeps_log_of_running_process(deployment):
+    """Второй запуск с --log не стирает журнал процесса, удерживающего блокировку."""
+    state, run = deployment
+    state["lock_busy"] = True
+    log = Path(state["repository"]) / ".cache/deploy.log"
+    log.parent.mkdir()
+    log.write_text("running deploy log", encoding="utf-8")
+    completed = run(arguments=("--log",))
+    assert completed.returncode != 0
+    assert log.read_text(encoding="utf-8") == "running deploy log"
+
+
+@pytest.mark.parametrize("script, marker", [("test.sh", "TEST"), ("check-quality.sh", "QUALITY")])
+def test_server_checks_show_details_unless_log_requested(deployment, script, marker):
+    """По умолчанию сборка и тесты видны, а --log сохраняет подробности в отдельный файл."""
+    state, run = deployment
+    completed = run(script=script)
+    assert completed.returncode == 0, completed.stderr
+    assert f"{marker}_DETAIL_FIRST" in completed.stdout
+    completed = run(script=script, arguments=("--log",))
+    assert completed.returncode == 0, completed.stderr
+    assert "Подробный вывод:" in completed.stdout
+    assert f"{marker}_DETAIL_FIRST" not in completed.stdout
+    filename = "tests-linux.log" if script == "test.sh" else "quality-linux.log"
+    assert f"{marker}_DETAIL_FIRST" in (Path(state["repository"]) / ".cache" / filename).read_text()
+
+
+@pytest.mark.parametrize("arguments", [(), ("--log",)])
+def test_test_script_keeps_failure_code_and_output(deployment, arguments):
+    """Ошибка тестового контейнера видна и сохраняет код выхода в обоих режимах."""
+    state, run = deployment
+    state["container_tests_exit"] = 7
+    completed = run(script="test.sh", arguments=arguments)
+    assert completed.returncode == 7
+    assert "TEST_DETAIL_FIRST" in completed.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Проверка POSIX-группы процессов и GNU timeout")
+def test_hung_docker_client_is_bounded(deployment):
+    """Даже зависание клиента до завершения exec не оставляет up.sh ждать бесконечно."""
+    import time
+
+    state, run = deployment
+    configured(state)
+    state["config"][4] = "1"
+    state["hang_command"] = "authenticate_user"
+    started = time.monotonic()
+    completed = run()
+    assert completed.returncode == 124
+    assert time.monotonic() - started < 25
+    assert "Превышено время ожидания" in completed.stderr
     assert state["up_count"] == 0

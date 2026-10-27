@@ -20,8 +20,8 @@ class Settings(BaseSettings):
         extra="forbid",
     )
     app_host: str = "0.0.0.0"
-    app_bind_ip: str = "127.0.0.1"
-    app_port: int = Field(8080, ge=1, le=65535)
+    app_bind_ip: str = "192.168.55.3"
+    app_port: int = Field(8082, ge=1, le=65535)
     data_dir: Path = ROOT / ".data"
     process_temp_dir: Path = ROOT / ".data/tmp"
     max_file_mb: int = Field(100, ge=1, le=100)
@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     queue_name: str = "contract-diff"
     rabbitmq_host: str = "rabbitmq"
     rabbitmq_container: str = "shared-rabbitmq-1"
+    rabbitmq_cli_timeout_seconds: int = Field(30, ge=5, le=120)
     rabbitmq_port: int = Field(5672, ge=1, le=65535)
     rabbitmq_vhost: str = "contract-diff"
     rabbitmq_user: str = "contract-diff"
