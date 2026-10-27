@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import BinaryIO
 from uuid import uuid4
 
+from app.application.ai_review import public_progress
 from app.application.ports import (
     DocumentExtractor,
     Exporter,
@@ -27,9 +28,9 @@ from app.domain.comparison import compare
 from app.domain.models import (
     TERMINAL,
     AccessDenied,
+    AIModes,
     Cancelled,
     ComparisonJob,
-    Difference,
     DocumentError,
     JobStatus,
 )
@@ -83,10 +84,14 @@ class ComparisonService:
         old_stream: BinaryIO,
         new_name: str,
         new_stream: BinaryIO,
-        use_ai: bool,
+        use_ai: bool = False,
+        *,
+        ai_full: bool | None = None,
+        ai_unverified: bool = False,
     ) -> ComparisonJob:
         """Резервирует квоту, сохраняет документы и публикует долговечную задачу."""
         now, job_id = time.time(), str(uuid4())
+        full = use_ai if ai_full is None and not ai_unverified else bool(ai_full)
         job = ComparisonJob(
             job_id,
             owner_hash(capability),
@@ -95,9 +100,11 @@ class ComparisonService:
             now,
             now,
             now + self.limits.timeout + self.limits.retention,
-            use_ai,
+            full or ai_unverified,
             Path(old_name.replace("\\", "/")).name[:240],
             Path(new_name.replace("\\", "/")).name[:240],
+            ai_full=full,
+            ai_unverified=ai_unverified,
         )
         self.repository.create(job, self.limits.max_jobs, self.limits.max_session_jobs)
         try:
@@ -119,14 +126,61 @@ class ComparisonService:
             raise AccessDenied()
         if job.status == JobStatus.EXPIRED or job.expires <= time.time():
             raise DocumentError("Срок хранения истёк; загрузите документы повторно")
+        if job.status in TERMINAL:
+            for mode in ("full", "unverified"):
+                report = job.ai_progress.get(mode, {})
+                if report.get("status") in {"running", "queued"}:
+                    report["status"] = (
+                        "cancelled"
+                        if job.status == JobStatus.CANCELLED
+                        else "partial"
+                        if report.get("succeeded")
+                        else "failed"
+                    )
         return job
 
     def result(self, job_id: str, capability: str) -> dict:
         """Выдаёт результат только завершённого задания его владельцу."""
         job = self.owned_job(job_id, capability)
-        if job.status not in {JobStatus.COMPLETED, JobStatus.WARNINGS}:
+        if job.status not in {JobStatus.COMPLETED, JobStatus.WARNINGS} and not (
+            job.status
+            in {JobStatus.PROCESSING, JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.QUEUED}
+            and self.storage.has_result(job_id)
+        ):
             raise DocumentError("Результат ещё не готов")
-        return self.storage.read_result(job_id)
+        data = self.storage.read_result(job_id)
+        if job.status in TERMINAL and data.get("ai_status") == "running":
+            data["ai_status"] = (
+                "partial"
+                if any(
+                    u.get("status") == "completed"
+                    for u in data.get("ai_review", {}).get("units", [])
+                )
+                else "failed"
+            )
+            for mode in ("full", "unverified"):
+                data.get("ai_review", {}).get(mode, {}).update(job.ai_progress.get(mode, {}))
+        return data
+
+    def retry_ai(self, job_id: str, capability: str) -> ComparisonJob:
+        """Повторяет неудачные единицы по сохранённому плану без повторного OCR и сравнения."""
+        job = self.owned_job(job_id, capability)
+        if not job.use_ai or not self.storage.has_result(job_id):
+            raise DocumentError("Нет сохранённого результата для повтора ИИ")
+        if not self.repository.requeue_ai(
+            job_id,
+            time.time() + self.limits.timeout + self.limits.retention,
+            self.limits.max_session_jobs,
+        ):
+            raise DocumentError("Проверка уже выполняется")
+        try:
+            self.publisher.publish(job_id)
+        except Exception:
+            self.repository.update(
+                job_id, status=JobStatus.WARNINGS, stage="Повтор не поставлен в очередь"
+            )
+            raise
+        return self.owned_job(job_id, capability)
 
     def cancel(self, job_id: str, capability: str) -> ComparisonJob:
         """Ставит флаг отмены; worker завершает дочерние процессы через checkpoint."""
@@ -151,115 +205,163 @@ class ComparisonService:
 
     @timed("comparison_process")
     def process(self, job_id: str) -> None:
-        """Выполняет ограниченный фоновый конвейер с идемпотентным захватом задания."""
+        """Сохраняет алгоритмический checkpoint перед ИИ и публикует только при действующей аренде."""
         lease = uuid4().hex
         if not self.repository.claim(job_id, lease):
             return
         job = self.repository.get(job_id)
         directory = self.storage.directory(job_id)
         started, last_stage, last_write = time.monotonic(), "", 0.0
+        result = None
+        enforce_timeout = True
 
         def checkpoint(stage: str) -> None:
-            """Проверяет отмену, общий таймаут и сохраняет только настоящий этап работы."""
+            """Проверяет отмену и аренду между дорогими операциями и сохраняет текущую стадию."""
             nonlocal last_stage, last_write
             current = self.repository.get(job_id)
             if current is None or current.status != JobStatus.PROCESSING or current.lease != lease:
                 raise Cancelled()
-            if time.monotonic() - started > self.limits.timeout:
+            if enforce_timeout and time.monotonic() - started > self.limits.timeout:
                 raise DocumentError("Превышено общее время сравнения")
             if stage != last_stage or time.monotonic() - last_write > 10:
                 self.repository.update(job_id, stage=stage)
                 last_stage, last_write = stage, time.monotonic()
 
+        def persist(current) -> None:
+            """Проверяет аренду до каждого атомарного checkpoint и сохраняет только безопасные счётчики в SQLite."""
+            checkpoint(last_stage or "ИИ-проверка")
+            self.storage.write_result(job_id, current)
+            self.repository.update(job_id, ai_progress=public_progress(current.ai_review))
+
         try:
-            old_path = next(
-                p for p in directory.glob("old.*") if p.suffix in {".doc", ".docx", ".pdf"}
-            )
-            new_path = next(
-                p for p in directory.glob("new.*") if p.suffix in {".doc", ".docx", ".pdf"}
-            )
-            visual_only = self.extractor.is_signed(old_path) or self.extractor.is_signed(new_path)
-            old = self.extractor.extract(
-                old_path, job.old_name, directory / "old", visual_only, checkpoint
-            )
-            new = self.extractor.extract(
-                new_path, job.new_name, directory / "new", visual_only, checkpoint
-            )
-            checkpoint("Структурное сопоставление и сравнение")
-            scores = self.visual_comparator.measure(old, new) if self.visual_comparator else {}
-            result = compare(old, new, scores)
-            checkpoint("Проверка полноты")
+            if job.resume_ai and self.storage.has_result(job_id):
+                result = self.storage.restore_result(job_id)
+                result.warnings = [w for w in result.warnings if not w.startswith("ИИ-проверка")]
+            else:
+                old_path = next(
+                    p for p in directory.glob("old.*") if p.suffix in {".doc", ".docx", ".pdf"}
+                )
+                new_path = next(
+                    p for p in directory.glob("new.*") if p.suffix in {".doc", ".docx", ".pdf"}
+                )
+                visual_only = self.extractor.is_signed(old_path) or self.extractor.is_signed(
+                    new_path
+                )
+                old = self.extractor.extract(
+                    old_path, job.old_name, directory / "old", visual_only, checkpoint
+                )
+                new = self.extractor.extract(
+                    new_path, job.new_name, directory / "new", visual_only, checkpoint
+                )
+                checkpoint("Структурное сопоставление и сравнение")
+                scores = self.visual_comparator.measure(old, new) if self.visual_comparator else {}
+                result = compare(old, new, scores)
+                checkpoint("Сохранение базового результата и экспорта")
+                result.exports = self.exporter.export(result, directory, checkpoint)
+                self.storage.write_result(job_id, result)
             if job.use_ai:
                 result.ai_status = "running"
-                checkpoint("Дополнительная ИИ-проверка")
+                result.exports_current = False
+                checkpoint("Планирование ИИ-проверки")
                 try:
-                    findings = self.verifier.verify(result, checkpoint)
-                    oa, nb = {e.id: e for e in old.elements}, {e.id: e for e in new.elements}
-                    for finding in findings:
-                        a, b = oa[finding.old_element], nb[finding.new_element]
-                        from app.domain.comparison import regions
-
-                        result.differences.append(
-                            Difference(
-                                f"AI{len(result.differences):05d}",
-                                finding.category,
-                                "Обнаружено ИИ, требует проверки",
-                                a.text,
-                                b.text,
-                                a.section,
-                                b.section,
-                                regions(a),
-                                regions(b),
-                                a.id,
-                                b.id,
-                                status="needs_review",
-                                source="ai",
-                                reason=finding.reason,
-                            )
-                        )
-                    result.ai_status = "completed"
+                    self.verifier.verify(
+                        result,
+                        checkpoint,
+                        modes=AIModes(bool(job.ai_full), bool(job.ai_unverified)),
+                        job_id=job_id,
+                        persist=persist,
+                    )
                 except Cancelled:
                     raise
-                except Exception:
-                    result.ai_status = "failed"
-                    result.warnings.append(
-                        "ИИ-проверка не выполнена; детерминированный результат сохранён"
+                except Exception as exc:
+                    result.ai_status = (
+                        "partial"
+                        if any(u.status == "completed" for u in result.ai_review.units)
+                        else "failed"
                     )
-            checkpoint("Подготовка экспорта")
-            result.exports = self.exporter.export(result, directory, checkpoint)
+                    result.warnings.append(
+                        "ИИ-проверка не завершена; алгоритмический результат сохранён"
+                    )
+                    for mode in ("full", "unverified"):
+                        progress = getattr(result.ai_review, mode)
+                        if getattr(job, "ai_" + mode) and progress.status not in {
+                            "completed",
+                            "partial",
+                            "failed",
+                        }:
+                            progress.status = "failed"
+                            progress.error_counts[type(exc).__name__] = 1
+                    logging.getLogger(__name__).error(
+                        "ai_pipeline_failed",
+                        extra={
+                            "job_id": job_id,
+                            "exception_class": type(exc).__name__,
+                            "error_kind": "job_time_budget"
+                            if isinstance(exc, DocumentError)
+                            else "internal",
+                            "status": result.ai_status,
+                        },
+                    )
+                enforce_timeout = False
+                checkpoint("Экспорт с результатами ИИ")
+                result.exports = self.exporter.export(result, directory, checkpoint)
+                result.exports_current = True
             checkpoint("Сохранение результата")
-            self.storage.write_result(job_id, result)
+            persist(result)
             warning = bool(
                 result.warnings
+                or result.ai_status in {"failed", "partial"}
                 or any(
-                    d.status == "unverified"
-                    or d.category in {"ambiguous_match", "unverified_region"}
+                    d.active
+                    and (
+                        d.status in {"unverified", "needs_review"}
+                        or d.category in {"ambiguous_match", "unverified_region"}
+                    )
                     for d in result.differences
                 )
             )
-            published = self.repository.finish(
+            self.repository.finish(
                 job_id,
                 lease,
                 JobStatus.WARNINGS if warning else JobStatus.COMPLETED,
                 time.time() + self.limits.retention,
             )
-            if not published:
-                self.storage.delete(job_id)
         except Cancelled:
-            # После потери аренды ни статус, ни результат не публикуются.
-            self.storage.delete(job_id)
+            current = self.repository.get(job_id)
+            # Не удаляем файлы нового владельца аренды или сохранённый базовый результат.
+            if (
+                current is None
+                or current.status == JobStatus.EXPIRED
+                or not self.storage.has_result(job_id)
+            ):
+                self.storage.delete(job_id)
         except Exception as exc:
             message = (
                 str(exc)
                 if isinstance(exc, DocumentError)
                 else "Ошибка обработки; проверьте формат документа и доступность инструментов"
             )
-            self.storage.delete(job_id)
-            self.repository.finish(
-                job_id, lease, JobStatus.FAILED, time.time() + self.limits.retention, message
-            )
+            if self.storage.has_result(job_id):
+                self.repository.finish(
+                    job_id,
+                    lease,
+                    JobStatus.WARNINGS,
+                    time.time() + self.limits.retention,
+                    "Обработка завершена частично; базовый результат сохранён",
+                )
+            else:
+                self.storage.delete(job_id)
+                self.repository.finish(
+                    job_id, lease, JobStatus.FAILED, time.time() + self.limits.retention, message
+                )
             logging.getLogger(__name__).error(
-                "comparison_failed", extra={"job_id": job_id, "status": "failed"}
+                "comparison_failed",
+                extra={
+                    "job_id": job_id,
+                    "status": "failed",
+                    "exception_class": type(exc).__name__,
+                    "error_kind": "processing",
+                },
             )
 
     def cleanup(self) -> None:
@@ -268,6 +370,15 @@ class ComparisonService:
         self.storage.cleanup_transients(now - self.limits.retention)
         for job in self.repository.due(now, now - self.limits.timeout):
             if job.status in {JobStatus.QUEUED, JobStatus.PROCESSING}:
+                if self.storage.has_result(job.id):
+                    self.repository.update(
+                        job.id,
+                        status=JobStatus.WARNINGS,
+                        stage="ИИ-проверка прервана; можно повторить",
+                        expires=now + self.limits.retention,
+                        error="Обработчик прерван; базовый результат сохранён",
+                    )
+                    continue
                 self.repository.update(
                     job.id,
                     status=JobStatus.FAILED,

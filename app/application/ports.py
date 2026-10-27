@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import BinaryIO, Protocol
 
 from app.domain.models import (
+    AIModes,
+    AIReply,
     ComparisonJob,
     ComparisonResult,
     DocumentVersion,
     ExportArtifact,
-    VerificationFinding,
+    ReviewUnit,
 )
 
 
@@ -41,6 +43,10 @@ class JobRepository(Protocol):
         """Возвращает просроченные либо зависшие задания для очистки."""
         ...
 
+    def requeue_ai(self, job_id: str, expires: float, max_session_jobs: int = 2) -> bool:
+        """Возвращает завершённый ИИ-проход в очередь без повторного извлечения документов."""
+        ...
+
 
 class JobStorage(Protocol):
     """Изолированные файлы задания; имена пользователя не используются как пути."""
@@ -63,6 +69,14 @@ class JobStorage(Protocol):
 
     def read_result(self, job_id: str) -> dict:
         """Читает сохранённый результат для выдачи владельцу."""
+        ...
+
+    def has_result(self, job_id: str) -> bool:
+        """Проверяет наличие checkpoint базового сравнения."""
+        ...
+
+    def restore_result(self, job_id: str) -> ComparisonResult:
+        """Восстанавливает типизированный результат из доверенного временного хранилища."""
         ...
 
     def cleanup_transients(self, older_than: float) -> None:
@@ -108,12 +122,36 @@ class Exporter(Protocol):
 
 
 class Verifier(Protocol):
-    """Дополнительная ограниченная проверка; основной результат не изменяется."""
+    """Дополнительная проверка с сохранением подтверждённых алгоритмических фактов."""
 
     def verify(
-        self, result: ComparisonResult, checkpoint: Callable[[str], None]
-    ) -> list[VerificationFinding]:
-        """Возвращает только структурно проверенные и локализованные замечания."""
+        self,
+        result: ComparisonResult,
+        checkpoint: Callable[[str], None],
+        *,
+        modes: AIModes,
+        job_id: str,
+        persist: Callable[[ComparisonResult], None],
+    ) -> None:
+        """Сохраняет план, прогресс и независимо проверенные результаты двух режимов."""
+        ...
+
+
+class ModelReviewer(Protocol):
+    """Одна операция корпоративной VLM без оркестрации всего сравнения."""
+
+    def review(
+        self, unit: ReviewUnit, old: DocumentVersion, new: DocumentVersion, attempt: int = 0
+    ) -> AIReply:
+        """Возвращает проверяемую структуру либо безопасную классифицированную ошибку."""
+        ...
+
+
+class GeometryRefiner(Protocol):
+    """Дополнительная точная геометрия из уже подготовленных исходных визуальных доказательств."""
+
+    def refine(self, result: ComparisonResult, checkpoint: Callable[[str], None]) -> None:
+        """Уточняет известные координаты без повторного OCR, сравнения или выдуманных областей."""
         ...
 
 

@@ -8,16 +8,24 @@
     {% set side='new' %}{% set title='Редакция контрагента' %}{% set symbol='▣' %}{% include 'components/upload.html' %}
   </div>
   <div class="comparison-form__actions">
-    <label class="toggle"><input class="toggle__input" type="checkbox" name="use_ai" data-ai><span class="toggle__track"></span><strong>Использовать ИИ</strong></label>
-    <p>Дополнительно проверяет смысловые изменения, перефразировки и скрытые правки <span title="Необязательная проверка корпоративной моделью">ⓘ</span></p>
+    <fieldset class="ai-modes"><legend>Режимы ИИ-проверки</legend>
+      <label><input type="checkbox" name="ai_full" data-ai data-ai-full><span><strong>Полная проверка документов с ИИ</strong><small>Все страницы, разделы, текст и графика</small></span></label>
+      <label><input type="checkbox" name="ai_unverified" data-ai-unverified><span><strong>ИИ-проверка непроверенных областей</strong><small>Адресная перепроверка сомнительных фрагментов</small></span></label>
+    </fieldset>
+    <label class="toggle visibility-toggle"><input class="toggle__input" type="checkbox" data-show-unverified-toggle checked><span class="toggle__track"></span><span><strong>Показывать непроверенные области</strong><small>В списке, документах и скачиваемых копиях. Статусы не меняются.</small></span></label>
     <button class="button" type="button" data-reset>⟳ Сбросить</button>
     <button class="button button--primary" type="submit" data-start disabled>✧ Сравнить документы</button>
     <button class="button" type="button" data-cancel hidden>Отменить</button>
   </div>
 </form>
 <div class="progress" role="status" aria-live="polite" data-progress hidden><span class="progress__spinner"></span><strong data-stage>В очереди</strong><span data-ai-status></span></div>
+<section class="ai-progress" data-ai-progress hidden aria-label="Статус ИИ-проверки">
+  <header><h2>Статус ИИ-проверки</h2><button class="button" type="button" data-ai-details>Подробнее</button><button class="button" type="button" data-ai-retry hidden>Повторить незавершённые проверки ИИ</button></header>
+  <p data-ai-mode-full></p><p data-ai-mode-unverified></p><p data-ai-resolution></p>
+  <div data-ai-operations hidden></div>
+</section>
 <section class="statistics" aria-label="Статистика сравнения">
-  {% for key,title,subtitle,icon in [('total','Изменения','всего различий','▥'),('added','Добавлено','новых фрагментов','+'),('deleted','Удалено','фрагментов удалено','−'),('ambiguous','Неоднозначно','требует проверки','='),('unverified','Непроверенные области','возможны графика или сложное форматирование','⠿')] %}
+  {% for key,title,subtitle,icon in [('total','Подтверждённые различия','уникальные подтверждённые изменения','▥'),('added','Добавлено','новых фрагментов','+'),('deleted','Удалено','фрагментов удалено','−'),('ai_needs_review','Замечания ИИ','требуют дополнительной проверки','✧'),('unverified','Непроверенные области','реальное число, включая скрытые','⠿')] %}
   <article class="stat stat--{{ key }}"><span class="stat__icon">{{ icon }}</span><div><h2>{{ title }}</h2><strong data-stat="{{ key }}">—</strong><p>{{ subtitle }}</p></div></article>
   {% endfor %}
 </section>

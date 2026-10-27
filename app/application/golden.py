@@ -52,7 +52,7 @@ def control_observed(result: dict, side: str, section: str, value: str) -> bool:
 def validate_matrix(matrix: dict, result: dict) -> dict:
     """Сверяет значения, пункт, обе геометрии и отрицательные контроли отдельно."""
     rows, accounted = [], set()
-    differences = result["differences"]
+    differences = [d for d in result["differences"] if d.get("active", True)]
     for entry in matrix["entries"]:
         expected = entry["type"]
         candidates = [
@@ -154,6 +154,9 @@ def validate_matrix(matrix: dict, result: dict) -> dict:
                 and compact(d["new_text"]) == compact(entry.get("new_text"))
                 and d["category"] == expected
             ]
+            confirmed = [d for d in found if d["status"] == "confirmed"]
+            if confirmed:
+                found = confirmed
             if not found:
                 state, reason = "FAIL", "Ожидаемые значения не найдены в нужном пункте"
             else:

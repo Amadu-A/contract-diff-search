@@ -193,13 +193,24 @@ def test_vlm_validates_response_without_credentials(settings):
         """Проверяет фактический HTTP-контракт без вызова стороннего облака."""
         assert "authorization" not in request.headers
         assert b'"model":"shared-vlm"' in request.content
-        return httpx.Response(200, json={"choices": [{"message": {"content": '{"findings":[]}'}}]})
+        assert b'"enable_thinking":false' in request.content
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"outcome":"same","readable":true,"findings":[]}'}}
+                ]
+            },
+        )
 
     result.old.elements[0].words = []
     result.new.elements[0].words = []
-    assert (
-        SharedVlmVerifier(settings, httpx.MockTransport(handler)).verify(result, checkpoint) == []
+    from app.domain.models import ReviewUnit
+
+    reply = SharedVlmVerifier(settings, httpx.MockTransport(handler)).review(
+        ReviewUnit("test", "full", "text"), result.old, result.new
     )
+    assert reply.outcome == "same" and reply.findings == []
 
 
 def test_word_export_is_real_and_keeps_layout(settings, extractor, tmp_path):

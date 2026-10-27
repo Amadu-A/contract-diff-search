@@ -1,7 +1,7 @@
 // app/web/static/js/features/viewer.js
 /** Один ленивый просмотрщик: страницы, масштаб, поворот, поиск и точные области. */
 import { apiRequest, jobUrl } from '../api.js';
-import { boundedPage } from '../state.js';
+import { boundedPage, visibleDifference } from '../state.js';
 
 export class Viewer {
   /** Подключает реальные действия к панели одной стороны; хранит только текущую страницу. */
@@ -16,6 +16,8 @@ export class Viewer {
     this.sequence = 0;
     this.selected = null;
     this.regions = [];
+    this.showUnverified = true;
+    this.exports = [];
     this.searchItems = [];
     this.searchIndex = 0;
     this.paper = root.querySelector('[data-paper]');
@@ -42,7 +44,7 @@ export class Viewer {
     root.querySelector('[data-search-next]').addEventListener('click', () => this.nextSearch());
     this.image.addEventListener('error', () => { if (this.job) this.onError(new Error('Не удалось загрузить страницу')); });
     root.querySelector('[data-export-word]').addEventListener('click', () => {
-      if (this.wordFormat) window.location.assign(jobUrl(this.job, `/export/${this.side}?format=${this.wordFormat}`));
+      if (this.wordFormat) window.location.assign(jobUrl(this.job, `/export/${this.side}?format=${this.wordFormat}&show_unverified=${this.showUnverified}`));
     });
   }
 
@@ -54,19 +56,51 @@ export class Viewer {
     this.root.querySelector('[data-page-count]').textContent = `/ ${document.pages.length}`;
     this.root.querySelector('[data-page-number]').max = document.pages.length;
     for (const control of this.root.querySelectorAll('[data-rotate],[data-page-prev],[data-page-next],[data-page-number],[data-zoom],[data-zoom-in],[data-zoom-out],[data-search-toggle],[data-search-input],[data-search-form] button')) control.disabled = false;
+    this.exports = exports;
+    this.updateExports();
+    this.root.querySelector('[data-viewer-empty]').hidden = true;
+    this.paper.hidden = false;
+    await this.go(1);
+  }
+
+  /** Выбирает артефакт по явному параметру видимости, не меняя результат сравнения. */
+  updateExports() {
+    if (!this.job) return;
     const pdf = this.root.querySelector('[data-export-pdf]');
-    pdf.href = jobUrl(job, `/export/${this.side}?format=pdf`);
-    pdf.removeAttribute('aria-disabled');
-    const word = exports.find(item => item.format !== 'pdf');
+    const artifact = this.exports.find(item => item.format === 'pdf' && (item.show_unverified ?? true) === this.showUnverified);
+    if (artifact?.available) {
+      pdf.href = jobUrl(this.job, `/export/${this.side}?format=pdf&show_unverified=${this.showUnverified}`);
+      pdf.removeAttribute('aria-disabled');
+    } else {
+      pdf.removeAttribute('href');
+      pdf.setAttribute('aria-disabled','true');
+    }
+    pdf.title = artifact?.reason || '';
+    pdf.textContent = this.showUnverified ? '⇩ PDF с изменениями и непроверенными областями' : '⇩ PDF только с изменениями';
+    const word = this.exports.find(item => item.format !== 'pdf' && (item.show_unverified ?? true) === this.showUnverified);
     const button = this.root.querySelector('[data-export-word]');
     button.hidden = !word;
     button.disabled = !word?.available;
     button.title = word?.reason || 'Экспорт прошёл проверку содержания и вёрстки';
     button.textContent = `▤ Скачать ${(word?.format || 'Word').toUpperCase()}`;
     this.wordFormat = word?.available ? word.format : null;
-    this.root.querySelector('[data-viewer-empty]').hidden = true;
-    this.paper.hidden = false;
-    await this.go(1);
+  }
+
+  /** Переключает слои и ссылки без повторного рендера, OCR и сравнения. */
+  setVisibility(value) {
+    this.showUnverified = value;
+    this.drawRegions();
+    this.updateExports();
+  }
+
+  /** Обновляет метки текущей страницы после checkpoint ИИ, сохраняя положение прокрутки. */
+  async refreshRegions() {
+    if (!this.job) return;
+    const sequence = this.sequence;
+    const result = await apiRequest(jobUrl(this.job, `/regions/${this.side}/${this.page}`));
+    if (sequence !== this.sequence) return;
+    this.regions = result.items;
+    this.drawRegions();
   }
 
   /** Меняет страницу и получает только её растр и области; старые ответы отбрасывает. */
@@ -110,9 +144,13 @@ export class Viewer {
       if (item.page === this.page) entries.push({region: item, category:'search', id:'search', status:'confirmed'});
     }
     for (const item of entries) {
+      if (!visibleDifference(item, this.showUnverified)) continue;
       const r = item.region;
       const region = document.createElement('span');
       region.className = 'viewer__region';
+      region.dataset.differenceId = item.id;
+      if (item.source === 'ai') region.classList.add('viewer__region--ai');
+      if (item.source === 'ai' && item.status !== 'confirmed') region.classList.add('viewer__region--review');
       if (item.category.endsWith('_added')) region.classList.add('viewer__region--added');
       if (['unverified_region','ambiguous_match'].includes(item.category) || item.status === 'unverified') region.classList.add('viewer__region--warning');
       if (item.id === this.selected) region.classList.add('viewer__region--selected');

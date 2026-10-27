@@ -51,6 +51,6 @@ class FakeExporter:
 class FailingVerifier:
     """Воспроизводит недоступность внешней VLM без сетевых запросов."""
 
-    def verify(self, result, checkpoint):
+    def verify(self, result, checkpoint, **kwargs):
         """Имитирует отказ необязательной зависимости после основного сравнения."""
         raise TimeoutError("VLM unavailable")

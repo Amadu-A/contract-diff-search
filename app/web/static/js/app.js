@@ -5,6 +5,7 @@ import { terminalStatus } from './state.js';
 import { UploadCard } from './features/upload.js';
 import { Viewer } from './features/viewer.js';
 import { Results } from './features/results.js';
+import { AIProgress } from './features/ai-progress.js';
 
 const form = document.querySelector('[data-comparison-form]');
 const start = document.querySelector('[data-start]');
@@ -17,6 +18,8 @@ let expires = 0;
 let busy = false;
 let sync = true;
 let toastTimer;
+let displayedJob = null;
+let lastAIRevision = '';
 
 /** Показывает понятную ошибку и не раскрывает технических ответов сервера. */
 function showError(error) {
@@ -49,6 +52,36 @@ async function synchronize(side, page) {
 
 const viewers = [...document.querySelectorAll('[data-viewer]')].map(root => new Viewer(root, synchronize, showError));
 const results = new Results(viewers, showError);
+const aiProgress = new AIProgress(showError, retryAI);
+document.querySelector('[data-show-unverified-toggle]').addEventListener('change', event => results.setVisibility(event.target.checked).catch(showError));
+
+/** Загружает checkpoint, сохраняя выбор и прокрутку при поступлении результатов ИИ. */
+async function displayResult(job, run, quiet = false) {
+  const summary = await apiRequest(jobUrl(job.id, '/result'));
+  if (run !== generation) return;
+  if (displayedJob !== job.id) {
+    await Promise.all(viewers.map(viewer => viewer.setDocument(job.id, summary.documents[viewer.side], summary.exports[viewer.side])));
+    displayedJob = job.id;
+  } else {
+    viewers.forEach(viewer => { viewer.exports = summary.exports[viewer.side]; viewer.updateExports(); });
+    await Promise.all(viewers.map(viewer => viewer.refreshRegions()));
+  }
+  await results.setResult(job.id, summary, quiet);
+  aiProgress.update(job, summary.ai_progress, summary.verification_metrics);
+  document.querySelector('[data-delete]').hidden = false;
+  return summary;
+}
+
+/** Повторяет сохранённые незавершённые операции, сохраняя уже извлечённые документы. */
+async function retryAI() {
+  if (!currentJob || busy) return;
+  const run = ++generation;
+  currentJob = await apiRequest(jobUrl(currentJob.id, '/ai/retry'), {method:'POST'});
+  setBusy(true);
+  progress.hidden = false;
+  progress.classList.remove('progress--done');
+  poll(currentJob.id, run);
+}
 
 /** Пересчитывает допустимость запуска после проверки карточек. */
 function updateFiles() {
@@ -60,7 +93,7 @@ const cards = [...document.querySelectorAll('[data-upload]')].map(root => new Up
 function setBusy(value) {
   busy = value;
   cards.forEach(card => card.setBusy(value));
-  document.querySelector('[data-ai]').disabled = value;
+  for (const control of document.querySelectorAll('[data-ai-full],[data-ai-unverified]')) control.disabled = value;
   start.hidden = value;
   cancel.hidden = !value;
   updateFiles();
@@ -73,21 +106,25 @@ async function poll(id, run) {
     if (run !== generation) return;
     if (currentJob?.stage !== job.stage) event(job.stage);
     currentJob = job;
+    aiProgress.update(job);
     document.querySelector('[data-stage]').textContent = job.stage;
     expires = job.expires;
     if (!terminalStatus(job.status)) {
+      const revision = JSON.stringify(job.ai_progress || {});
+      if (Object.keys(job.ai_progress || {}).length && revision !== lastAIRevision) {
+        await displayResult(job, run, true);
+        lastAIRevision = revision;
+      }
       pollTimer = setTimeout(() => poll(id, run), 1200);
       return;
     }
     setBusy(false);
-    if (['completed','completed_with_warnings'].includes(job.status)) {
-      const summary = await apiRequest(jobUrl(id, '/result'));
+    if (['completed','completed_with_warnings'].includes(job.status) || (displayedJob === id && ['cancelled','failed'].includes(job.status))) {
+      const summary = await displayResult(job, run, displayedJob === id);
       if (run !== generation) return;
-      await Promise.all(viewers.map(viewer => viewer.setDocument(id, summary.documents[viewer.side], summary.exports[viewer.side])));
-      await results.setResult(id, summary);
       progress.classList.add('progress--done');
-      document.querySelector('[data-stage]').textContent = job.status === 'completed' ? 'Сравнение завершено' : 'Сравнение завершено с предупреждениями';
-      document.querySelector('[data-ai-status]').textContent = ({not_requested:'Без дополнительной ИИ-проверки',completed:'ИИ-проверка завершена',failed:'ИИ-проверка недоступна; основной результат сохранён'})[summary.ai_status] || '';
+      document.querySelector('[data-stage]').textContent = job.status === 'cancelled' ? 'Проверка отменена; сохранён частичный результат' : job.status === 'completed' ? 'Сравнение завершено' : 'Сравнение завершено с предупреждениями';
+      document.querySelector('[data-ai-status]').textContent = ({not_requested:'Без ИИ-проверки',completed:'Запланированные ИИ-операции выполнены',partial:'ИИ-проверка частичная; основной результат сохранён',running:'ИИ-проверка продолжается',failed:'ИИ-проверка завершилась ошибкой; основной результат сохранён'})[summary.ai_status] || '';
       document.querySelector('[data-delete]').hidden = false;
       event('Результат и доступные экспорты готовы');
     } else {
@@ -110,6 +147,9 @@ form.addEventListener('submit', async submitEvent => {
   const run = ++generation;
   clearTimeout(pollTimer);
   results.clear();
+  aiProgress.clear();
+  displayedJob = null;
+  lastAIRevision = '';
   viewers.forEach(viewer => viewer.clear());
   setBusy(true);
   progress.hidden = false;
@@ -120,7 +160,8 @@ form.addEventListener('submit', async submitEvent => {
     if (currentJob) await apiRequest(jobUrl(currentJob.id), {method:'DELETE'}).catch(() => {});
     const body = new FormData();
     cards.forEach(card => body.append(card.root.dataset.upload, card.file));
-    body.append('use_ai', String(document.querySelector('[data-ai]').checked));
+    body.append('ai_full', String(document.querySelector('[data-ai-full]').checked));
+    body.append('ai_unverified', String(document.querySelector('[data-ai-unverified]').checked));
     const job = await apiRequest('/api/v1/comparisons', {method:'POST', body});
     if (run !== generation) {
       await apiRequest(jobUrl(job.id), {method:'DELETE'});
@@ -145,9 +186,15 @@ async function reset() {
   currentJob = null;
   expires = 0;
   results.clear();
+  aiProgress.clear();
+  displayedJob = null;
+  lastAIRevision = '';
   viewers.forEach(viewer => viewer.clear());
   cards.forEach(card => card.setFile(null, false));
-  document.querySelector('[data-ai]').checked = false;
+  document.querySelector('[data-ai-full]').checked = false;
+  document.querySelector('[data-ai-unverified]').checked = false;
+  document.querySelector('[data-show-unverified-toggle]').checked = true;
+  await results.setVisibility(true);
   document.querySelector('[data-delete]').hidden = true;
   progress.hidden = true;
   setBusy(false);
@@ -183,6 +230,8 @@ setInterval(() => {
     clearTimeout(pollTimer);
     viewers.forEach(viewer => viewer.clear());
     results.clear();
+    aiProgress.clear();
+    displayedJob = null;
     setBusy(false);
     currentJob = null;
     document.querySelector('[data-retention]').textContent = 'Срок хранения истёк. Загрузите документы повторно.';

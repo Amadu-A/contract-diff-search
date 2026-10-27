@@ -5,6 +5,7 @@ from collections import Counter
 
 from app.domain.comparison import statistics
 from app.domain.models import Difference
+from app.domain.visibility import visible
 
 
 def summary(data: dict) -> dict:
@@ -15,7 +16,14 @@ def summary(data: dict) -> dict:
     }
     exports = {
         side: [
-            {"format": e["format"], "available": bool(e["path"]), "reason": e["reason"]}
+            {
+                "format": e["format"],
+                "available": bool(e["path"]) and data.get("exports_current", True),
+                "reason": e["reason"]
+                if data.get("exports_current", True)
+                else "Экспорт с текущими результатами ИИ ещё готовится",
+                "show_unverified": e.get("show_unverified", True),
+            }
             for e in items
         ]
         for side, items in data["exports"].items()
@@ -27,15 +35,30 @@ def summary(data: dict) -> dict:
         "ai_status": data["ai_status"],
         "exports": exports,
         "coverage": data["coverage"],
+        "ai_progress": {
+            name: data.get("ai_review", {}).get(name, {}) for name in ("full", "unverified")
+        },
+        "verification_metrics": {
+            "original_unverified": data["coverage"].get("original_unverified", 0),
+            "resolved_algorithms": data["coverage"].get("resolved_algorithms", 0),
+            "resolved_ai": data["coverage"].get("resolved_ai", 0),
+            "new_unverified": data["coverage"].get("new_unverified", 0),
+            "remaining_unverified": statistics([Difference(**d) for d in data["differences"]])[
+                "unverified"
+            ],
+        },
     }
 
 
-def filter_differences(data: dict, category: str, status: str, offset: int, limit: int) -> dict:
+def filter_differences(
+    data: dict, category: str, status: str, offset: int, limit: int, show_unverified: bool = True
+) -> dict:
     """Фильтрует уникальные изменения, не меняя исходный результат и покрытие."""
     items = [
         d
         for d in data["differences"]
-        if (not category or d["category"] == category)
+        if visible(d, show_unverified)
+        and (not category or d["category"] == category)
         and (
             not status
             or d["status"] == status
@@ -65,15 +88,46 @@ def search_text(data: dict, side: str, query: str) -> dict:
     return {"items": found}
 
 
-def page_regions(data: dict, side: str, page: int) -> dict:
+def page_regions(data: dict, side: str, page: int, show_unverified: bool = True) -> dict:
     """Сохраняет все маркеры страницы независимо от текущих фильтров списка."""
     return {
         "items": [
-            {"id": d["id"], "category": d["category"], "status": d["status"], "region": r}
+            {
+                "id": d["id"],
+                "category": d["category"],
+                "status": d["status"],
+                "source": d["source"],
+                "region": r,
+            }
             for d in data["differences"]
+            if visible(d, show_unverified)
             for r in d[f"{side}_regions"]
             if r["page"] == page
         ]
+    }
+
+
+def ai_operations(data: dict, offset: int, limit: int) -> dict:
+    """Отдаёт технический журнал единиц владельцу без private-path, текста и изображений."""
+    units = data.get("ai_review", {}).get("units", [])
+    return {
+        "total": len(units),
+        "items": [
+            {
+                key: unit.get(key)
+                for key in (
+                    "id",
+                    "mode",
+                    "kind",
+                    "status",
+                    "outcome",
+                    "attempts",
+                    "error_kind",
+                    "duration_ms",
+                )
+            }
+            for unit in units[offset : offset + limit]
+        ],
     }
 
 

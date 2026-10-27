@@ -173,6 +173,8 @@ def create_app(
         old: Annotated[UploadFile, File()],
         new: Annotated[UploadFile, File()],
         use_ai: Annotated[bool, Form()] = False,
+        ai_full: Annotated[bool | None, Form()] = None,
+        ai_unverified: Annotated[bool, Form()] = False,
     ):
         """Сохраняет два проверенных файла и немедленно возвращает фоновое задание."""
         try:
@@ -184,6 +186,8 @@ def create_app(
                     new.filename or "",
                     new.file,
                     use_ai,
+                    ai_full=ai_full,
+                    ai_unverified=ai_unverified,
                 )
             )
         finally:
@@ -209,10 +213,16 @@ def create_app(
         status: str = "",
         offset: int = Query(0, ge=0),
         limit: int = Query(200, ge=1, le=500),
+        show_unverified: bool = True,
     ):
         """Фильтрует уникальные изменения; поддерживает постраничную загрузку длинных результатов."""
         return queries.filter_differences(
-            service.result(str(job_id), capability(request)), category, status, offset, limit
+            service.result(str(job_id), capability(request)),
+            category,
+            status,
+            offset,
+            limit,
+            show_unverified,
         )
 
     @app.get("/api/v1/comparisons/{job_id}/differences/{difference_id}")
@@ -265,10 +275,17 @@ def create_app(
 
     @app.get("/api/v1/comparisons/{job_id}/regions/{side}/{page}")
     def page_regions(
-        job_id: UUID, side: Literal["old", "new"], page: int, request: Request, service: Service
+        job_id: UUID,
+        side: Literal["old", "new"],
+        page: int,
+        request: Request,
+        service: Service,
+        show_unverified: bool = True,
     ):
         """Возвращает все маркеры текущей страницы независимо от фильтра и пагинации списка."""
-        return queries.page_regions(service.result(str(job_id), capability(request)), side, page)
+        return queries.page_regions(
+            service.result(str(job_id), capability(request)), side, page, show_unverified
+        )
 
     @app.get("/api/v1/comparisons/{job_id}/correspondence/{side}/{page}")
     def correspondence(
@@ -284,15 +301,25 @@ def create_app(
         request: Request,
         service: Service,
         format: Literal["pdf", "doc", "docx"] = "pdf",
+        show_unverified: bool = True,
     ):
         """Выдаёт только реально созданный и проверенный артефакт владельцу задания."""
         data = service.result(str(job_id), capability(request))
-        item = next((e for e in data["exports"].get(side, []) if e["format"] == format), None)
+        if not data.get("exports_current", True):
+            raise HTTPException(409, "Экспорт с текущими результатами ИИ ещё готовится")
+        item = next(
+            (
+                e
+                for e in data["exports"].get(side, [])
+                if e["format"] == format and e.get("show_unverified", True) == show_unverified
+            ),
+            None,
+        )
         if item is None or not item["path"]:
             raise HTTPException(409, item["reason"] if item else "Этот формат экспорта недоступен")
         return FileResponse(
             item["path"],
-            filename=f"{side}-highlighted.{format}",
+            filename=f"{side}-{'with-unverified' if show_unverified else 'changes-only'}.{format}",
             media_type="application/octet-stream",
         )
 
@@ -330,6 +357,24 @@ def create_app(
     def cancel(job_id: UUID, request: Request, service: Service):
         """Отменяет только принадлежащее сессии задание."""
         return public_job(service.cancel(str(job_id), capability(request)))
+
+    @app.post("/api/v1/comparisons/{job_id}/ai/retry", response_model=JobResponse, status_code=202)
+    def retry_ai(job_id: UUID, request: Request, service: Service):
+        """Повторяет незавершённую ИИ-проверку владельца без повторной загрузки и OCR."""
+        return public_job(service.retry_ai(str(job_id), capability(request)))
+
+    @app.get("/api/v1/comparisons/{job_id}/ai/operations")
+    def ai_operations(
+        job_id: UUID,
+        request: Request,
+        service: Service,
+        offset: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        """Показывает владельцу фактические технические результаты отдельных операций ИИ."""
+        return queries.ai_operations(
+            service.result(str(job_id), capability(request)), offset, limit
+        )
 
     @app.delete("/api/v1/comparisons/{job_id}", status_code=204)
     def delete(job_id: UUID, request: Request, service: Service):

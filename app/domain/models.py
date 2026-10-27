@@ -163,6 +163,11 @@ class Difference:
     source: str = "deterministic"
     reason: str = ""
     subcategories: list[str] = field(default_factory=list)
+    active: bool = True
+    uncertainty_id: str = ""
+    ai_mode: str = ""
+    verified_by: str = ""
+    confidence: float = 0.0
 
 
 @dataclass
@@ -173,6 +178,10 @@ class CoverageReport:
     new: dict[str, str]
     pages: dict[str, list[int]]
     geometry_missing: int = 0
+    original_unverified: int = 0
+    resolved_algorithms: int = 0
+    resolved_ai: int = 0
+    new_unverified: int = 0
 
 
 @dataclass
@@ -185,6 +194,99 @@ class VerificationFinding:
     reason: str
 
 
+@dataclass(frozen=True)
+class AIModes:
+    """Независимые режимы; оба выключенных оставляют только алгоритмический конвейер."""
+
+    full: bool = False
+    unverified: bool = False
+
+
+@dataclass
+class AIObservation:
+    """Ответ модели с цитатами и ссылками только на предложенные источником области."""
+
+    category: str
+    old_value: str = ""
+    new_value: str = ""
+    old_ref: str = ""
+    new_ref: str = ""
+    reason: str = ""
+    confidence: float = 0.0
+    old_quote: str = ""
+    new_quote: str = ""
+
+
+@dataclass
+class AIReply:
+    """Структурированный ответ не содержит выдуманных моделью координат."""
+
+    outcome: str
+    readable: bool
+    findings: list[AIObservation] = field(default_factory=list)
+    evidence: list[AIObservation] = field(default_factory=list)
+    complete: bool = True
+    old_evidence: list[Word] = field(default_factory=list)
+    new_evidence: list[Word] = field(default_factory=list)
+
+
+@dataclass
+class ReviewUnit:
+    """Одна воспроизводимая единица плана и её сохранённое состояние выполнения."""
+
+    id: str
+    mode: str
+    kind: str
+    old_elements: list[str] = field(default_factory=list)
+    new_elements: list[str] = field(default_factory=list)
+    old_regions: list[VisualRegion] = field(default_factory=list)
+    new_regions: list[VisualRegion] = field(default_factory=list)
+    old_text: str = ""
+    new_text: str = ""
+    targets: list[str] = field(default_factory=list)
+    status: str = "pending"
+    outcome: str = "unverified"
+    attempts: int = 0
+    error_kind: str = ""
+    duration_ms: float = 0
+    prompt_version: str = "1"
+    segment: int = 0
+    job_id: str = ""
+    disabled_features: list[str] = field(default_factory=list)
+    observations: list[AIObservation] = field(default_factory=list)
+    readable: bool | None = None
+    old_evidence: list[Word] = field(default_factory=list)
+    new_evidence: list[Word] = field(default_factory=list)
+
+
+@dataclass
+class AIModeProgress:
+    """Фактические счётчики режима; выполненное не приравнивается к подтверждённому."""
+
+    status: str = "not_requested"
+    planned: int = 0
+    processed: int = 0
+    succeeded: int = 0
+    failed: int = 0
+    remaining: int = 0
+    reused: int = 0
+    pages_planned: dict[str, list[int]] = field(default_factory=dict)
+    pages_processed: dict[str, list[int]] = field(default_factory=dict)
+    error_counts: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class AIReviewState:
+    """План, результаты отдельных единиц и независимый прогресс двух режимов."""
+
+    full: AIModeProgress = field(default_factory=AIModeProgress)
+    unverified: AIModeProgress = field(default_factory=AIModeProgress)
+    units: list[ReviewUnit] = field(default_factory=list)
+    original_uncertainties: list[str] = field(default_factory=list)
+    resolutions: dict[str, str] = field(default_factory=dict)
+    elapsed_ms: float = 0
+
+
 @dataclass
 class ExportArtifact:
     """Доступность отдельного проверенного экспорта без изменения оригинала."""
@@ -192,11 +294,12 @@ class ExportArtifact:
     format: str
     path: str | None
     reason: str = ""
+    show_unverified: bool = True
 
 
 @dataclass
 class ComparisonResult:
-    """Детерминированный результат, покрытие и независимый статус ИИ."""
+    """Результат сравнения, покрытие и независимый статус ИИ."""
 
     old: DocumentVersion
     new: DocumentVersion
@@ -206,6 +309,8 @@ class ComparisonResult:
     ai_status: str = "not_requested"
     warnings: list[str] = field(default_factory=list)
     exports: dict[str, list[ExportArtifact]] = field(default_factory=dict)
+    ai_review: AIReviewState = field(default_factory=AIReviewState)
+    exports_current: bool = True
 
 
 @dataclass
@@ -224,6 +329,19 @@ class ComparisonJob:
     new_name: str
     error: str = ""
     lease: str = ""
+    ai_full: bool = False
+    ai_unverified: bool = False
+    ai_progress: dict = field(default_factory=dict)
+    resume_ai: bool = False
+
+
+class VerificationError(Exception):
+    """Безопасная классифицированная ошибка VLM без содержимого запроса и ответа."""
+
+    def __init__(self, kind: str, *, http_status: int | None = None, retryable: bool = False):
+        """Сохраняет только техническую категорию и возможность ограниченного повтора."""
+        super().__init__(kind)
+        self.kind, self.http_status, self.retryable = kind, http_status, retryable
 
 
 class DocumentError(Exception):

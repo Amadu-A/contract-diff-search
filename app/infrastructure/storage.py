@@ -13,6 +13,7 @@ from zipfile import BadZipFile, ZipFile
 
 import olefile
 from lxml import etree
+from pydantic import TypeAdapter
 from pypdf import PdfReader
 
 from app.domain.models import ComparisonResult, DocumentError
@@ -153,6 +154,14 @@ class FileStorage:
     def read_result(self, job_id: str) -> dict:
         """Читает только результат указанного задания; доступ проверяет use-case."""
         return json.loads((self.directory(job_id) / "result.json").read_text(encoding="utf-8"))
+
+    def has_result(self, job_id: str) -> bool:
+        """Проверяет наличие атомарного checkpoint базового сравнения."""
+        return (self.directory(job_id) / "result.json").is_file()
+
+    def restore_result(self, job_id: str) -> ComparisonResult:
+        """Восстанавливает типизированный checkpoint без повторного чтения/OCR оригиналов."""
+        return TypeAdapter(ComparisonResult).validate_python(self.read_result(job_id))
 
     def cleanup_transients(self, older_than: float) -> None:
         """Чистит только lo-профили заданного корня, не затрагивая активную конвертацию."""

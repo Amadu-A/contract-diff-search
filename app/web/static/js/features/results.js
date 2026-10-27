@@ -11,6 +11,7 @@ export class Results {
     this.items = [];
     this.index = -1;
     this.generation = 0;
+    this.showUnverified = true;
     document.querySelector('[data-filter-toggle]').addEventListener('click', () => {
       const filters = document.querySelector('[data-filters]');
       filters.hidden = !filters.hidden;
@@ -21,6 +22,8 @@ export class Results {
     document.querySelector('[data-diff-next]').addEventListener('click', () => this.select(this.index + 1));
     document.querySelector('[data-go-region]').addEventListener('click', () => this.select(this.index));
     document.querySelector('[data-show-unverified]').addEventListener('click', () => {
+      document.querySelector('[data-show-unverified-toggle]').checked = true;
+      this.setVisibility(true);
       document.querySelector('[data-status-filter]').value = 'unverified';
       document.querySelector('[data-category-filter]').value = '';
       document.querySelector('[data-filters]').hidden = false;
@@ -30,29 +33,48 @@ export class Results {
   }
 
   /** Привязывает завершённое задание и его сводку к интерфейсу. */
-  async setResult(job, summary) {
+  async setResult(job, summary, quiet = false) {
     this.job = job;
-    for (const [key, value] of Object.entries(summary.statistics)) document.querySelector(`[data-stat="${key}"]`).textContent = value;
+    for (const [key, value] of Object.entries(summary.statistics)) {
+      const node = document.querySelector(`[data-stat="${key}"]`);
+      if (node) node.textContent = value;
+    }
     const warning = summary.statistics.unverified > 0 || summary.warnings.length > 0;
     document.querySelector('[data-warning]').hidden = !warning;
     document.querySelector('[data-warning-text]').textContent = summary.warnings.join('. ') || 'Некоторые участки не удалось проверить автоматически. Просмотрите их вручную.';
-    await this.load();
+    await this.load(false, quiet);
+  }
+
+  /** Скрывает только предупреждения и синхронизирует обе панели и скачивание. */
+  async setVisibility(value) {
+    this.showUnverified = value;
+    this.viewers.forEach(viewer => viewer.setVisibility(value));
+    if (!value) {
+      if (document.querySelector('[data-status-filter]').value === 'unverified') document.querySelector('[data-status-filter]').value = '';
+      if (['unverified_region','ambiguous_match'].includes(document.querySelector('[data-category-filter]').value)) document.querySelector('[data-category-filter]').value = '';
+    }
+    if (this.job) await this.load();
   }
 
   /** Загружает порцию отфильтрованных записей; сброс отбрасывает запоздалый ответ. */
-  async load(append = false) {
+  async load(append = false, quiet = false) {
     if (!this.job) return;
     const generation = ++this.generation;
     const category = document.querySelector('[data-category-filter]').value;
     const status = document.querySelector('[data-status-filter]').value;
     const offset = append ? this.items.length : 0;
-    const response = await apiRequest(jobUrl(this.job, `/differences?category=${encodeURIComponent(category)}&status=${encodeURIComponent(status)}&offset=${offset}&limit=200`));
+    const selected = this.items[this.index]?.id;
+    const list = document.querySelector('[data-differences]');
+    const scrollTop = list.scrollTop;
+    const response = await apiRequest(jobUrl(this.job, `/differences?category=${encodeURIComponent(category)}&status=${encodeURIComponent(status)}&offset=${offset}&limit=200&show_unverified=${this.showUnverified}`));
     if (generation !== this.generation) return;
     this.items = append ? [...this.items, ...response.items] : response.items;
     document.querySelector('[data-list-count]').textContent = response.total;
     document.querySelector('[data-load-more]').hidden = this.items.length >= response.total;
     this.renderList();
-    if (this.items.length) await this.select(append ? Math.max(0, this.index) : 0);
+    if (quiet) list.scrollTop = scrollTop;
+    const preserved = quiet ? this.items.findIndex(item => item.id === selected) : -1;
+    if (this.items.length) await this.select(preserved >= 0 ? preserved : append ? Math.max(0, this.index) : 0, preserved < 0);
     else this.clearDetails('По выбранным фильтрам различий нет');
   }
 
@@ -86,7 +108,7 @@ export class Results {
   }
 
   /** Показывает выбранное событие и соответствующие области обеих редакций. */
-  async select(index) {
+  async select(index, navigate = true) {
     if (index < 0 || index >= this.items.length) return;
     this.index = index;
     const item = this.items[index];
@@ -96,7 +118,7 @@ export class Results {
     document.querySelector('[data-detail-position]').textContent = `${index + 1}/${this.items.length}`;
     document.querySelector('[data-detail-meta]').textContent = `Наша: ${item.old_regions[0]?.page || 'нет привязки'} · Контрагент: ${item.new_regions[0]?.page || 'нет привязки'}`;
     document.querySelector('[data-detail-category]').textContent = categoryLabel(item.category);
-    document.querySelector('[data-detail-reason]').textContent = item.source === 'ai' ? `Обнаружено ИИ, требует проверки. ${item.reason}` : item.reason;
+    document.querySelector('[data-detail-reason]').textContent = item.source === 'ai' ? `${item.status === 'confirmed' ? 'Подтверждено независимой проверкой' : 'Обнаружено ИИ, требует проверки'}. ${item.reason}` : item.reason;
     document.querySelector('[data-detail-old]').textContent = item.old_text || 'Фрагмент отсутствует';
     document.querySelector('[data-detail-new]').textContent = item.new_text || 'Фрагмент отсутствует';
     for (const side of ['old','new']) {
@@ -105,11 +127,11 @@ export class Results {
       if (!image.hidden) image.src = jobUrl(this.job, `/crop/${side}/${encodeURIComponent(item.id)}`);
       else image.removeAttribute('src');
     }
-    document.querySelector('[data-detail-source]').textContent = item.source === 'ai' ? 'Источник: дополнительная ИИ-проверка' : 'Источник: детерминированное сравнение';
+    document.querySelector('[data-detail-source]').textContent = item.source === 'ai' ? `Источник: ИИ (${item.ai_mode === 'full' ? 'полный проход' : 'непроверенные области'})` : item.verified_by ? 'Источник: алгоритмы; перепроверено ИИ' : 'Источник: детерминированное сравнение';
     document.querySelector('[data-diff-prev]').disabled = index === 0;
     document.querySelector('[data-diff-next]').disabled = index === this.items.length - 1;
     for (const button of document.querySelectorAll('[data-index]')) button.setAttribute('aria-current', String(Number(button.dataset.index) === index));
-    await Promise.all(this.viewers.map(viewer => viewer.select(item))).catch(this.onError);
+    if (navigate) await Promise.all(this.viewers.map(viewer => viewer.select(item))).catch(this.onError);
   }
 
   /** Убирает устаревшие детали при фильтрации или удалении задания. */

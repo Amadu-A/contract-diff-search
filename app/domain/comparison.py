@@ -15,6 +15,7 @@ from app.domain.models import (
     VisualRegion,
 )
 from app.domain.text import NUMBER, content, normalize, tokens
+from app.domain.visibility import is_unverified, uncertainty_ids
 
 
 def regions(element: DocumentElement, start: int = 0, end: int | None = None) -> list[VisualRegion]:
@@ -326,15 +327,7 @@ def compare(
                 category, state = "unverified_region", "unverified"
             elif element.id in ambiguous:
                 category, state = "ambiguous_match", "ambiguous"
-            elif (
-                element.confidence < 0.65
-                or any(p.warnings for p in (new.pages if side == "old" else old.pages))
-                or (
-                    element.kind == "cell"
-                    and len(element.text) < 65
-                    and (new.graphics if side == "old" else old.graphics)
-                )
-            ):
+            elif element.confidence < 0.65 or _relevant_warning(element, side, old, new, matches):
                 category, state = "unverified_region", "unverified"
             else:
                 category, state = ("text_deleted" if side == "old" else "text_added"), "changed"
@@ -381,6 +374,7 @@ def compare(
                 )
 
     differences.extend(_graphics(old, new, visual_scores or {}))
+    _group_uncertainties(differences, matches)
     for version, coverage, side in ((old, coverage_a, "old"), (new, coverage_b, "new")):
         for graphic in version.graphics:
             affected = [d for d in differences if getattr(d, side + "_element") == graphic.id]
@@ -396,12 +390,14 @@ def compare(
     missing = sum(
         bool(d.old_element and not d.old_regions) + bool(d.new_element and not d.new_regions)
         for d in differences
+        if d.active
     )
     coverage = CoverageReport(
         coverage_a,
         coverage_b,
         {"old": [p.number for p in old.pages], "new": [p.number for p in new.pages]},
         missing,
+        len(uncertainty_ids(differences)),
     )
     return ComparisonResult(
         old,
@@ -413,6 +409,95 @@ def compare(
         + new.warnings
         + (["Не все изменения имеют надёжную геометрическую привязку"] if missing else []),
     )
+
+
+def _relevant_warning(element, side, old, new, matches) -> bool:
+    """Ограничивает предупреждение соответствующим разделом/соседними структурными опорами."""
+    own, other = (old, new) if side == "old" else (new, old)
+    pages = {
+        w.region.page
+        for e in other.elements
+        if element.section and e.section == element.section
+        for w in e.words
+    }
+    if not pages:
+        order = {e.id: i for i, e in enumerate(own.elements)}
+        opposite = {e.id: e for e in other.elements}
+        anchors = sorted(
+            [
+                (min(abs(order.get(i, -10000) - order[element.id]) for i in getattr(m, side)), m)
+                for m in matches
+                if getattr(m, side)
+            ],
+            key=lambda item: item[0],
+        )
+        for _, match in anchors[:2]:
+            for identifier in match.new if side == "old" else match.old:
+                if identifier in opposite:
+                    pages.update(w.region.page for w in opposite[identifier].words)
+    if not other.elements:
+        return any(p.warnings for p in other.pages)
+    return any(p.warnings for p in other.pages if p.number in pages)
+
+
+def _group_uncertainties(differences, matches) -> None:
+    """Объединяет дубли предупреждений одного соответствия без потери локальных изменений."""
+    owners = {}
+    for index, match in enumerate(matches):
+        for side in ("old", "new"):
+            for identifier in getattr(match, side):
+                owners[(side, identifier)] = f"pair-{index}"
+    warnings = {}
+    for difference in differences:
+        if not is_unverified(difference):
+            continue
+        roots = sorted(
+            {
+                owners.get(
+                    (side, getattr(difference, side + "_element")),
+                    f"{side}:{getattr(difference, side + '_element')}",
+                )
+                for side in ("old", "new")
+                if getattr(difference, side + "_element")
+            }
+        )
+        if not roots:
+            roots = [
+                f"{side}:page:{r.page}"
+                for side in ("old", "new")
+                for r in getattr(difference, side + "_regions")
+            ]
+        difference.uncertainty_id = "|".join(roots) or "unknown-area"
+        if difference.category != "unverified_region":
+            continue
+        previous = warnings.get(difference.uncertainty_id)
+        if previous is None:
+            warnings[difference.uncertainty_id] = difference
+            continue
+        for side in ("old", "new"):
+            areas = getattr(previous, side + "_regions")
+            areas.extend(r for r in getattr(difference, side + "_regions") if r not in areas)
+            if not getattr(previous, side + "_element"):
+                setattr(previous, side + "_element", getattr(difference, side + "_element"))
+                setattr(previous, side + "_text", getattr(difference, side + "_text"))
+        if difference.reason and difference.reason not in previous.reason:
+            previous.reason = "; ".join(filter(None, (previous.reason, difference.reason)))
+        difference.active = False
+    for root, warning in warnings.items():
+        candidates = [
+            d
+            for d in differences
+            if d.active
+            and is_unverified(d)
+            and d.uncertainty_id == root
+            and d.category != "unverified_region"
+        ]
+        if candidates:
+            warning.active = False
+            for candidate in candidates:
+                candidate.reason = "; ".join(
+                    dict.fromkeys(filter(None, (candidate.reason, warning.reason)))
+                )
 
 
 def _style_signature(element: DocumentElement) -> tuple:
@@ -512,16 +597,16 @@ def _graphics(
 
 def statistics(differences: list[Difference]) -> dict[str, int]:
     """Считает уникальные события; замечания ИИ и пробелы покрытия не входят в total."""
-    counts = Counter(d.category for d in differences if d.source == "deterministic")
+    active = [d for d in differences if d.active]
+    confirmed = [d for d in active if d.status == "confirmed" and not is_unverified(d)]
+    counts = Counter(d.category for d in confirmed)
     excluded = {"unverified_region", "ambiguous_match"}
     return {
-        "total": sum(
-            d.source == "deterministic" and d.category not in excluded for d in differences
-        ),
+        "total": sum(d.category not in excluded for d in confirmed),
         "added": counts["text_added"] + counts["graphic_added"],
         "deleted": counts["text_deleted"] + counts["graphic_deleted"],
-        "ambiguous": counts["ambiguous_match"],
-        "unverified": sum(
-            d.category == "unverified_region" or d.status == "unverified" for d in differences
-        ),
+        "ambiguous": sum(d.category == "ambiguous_match" for d in active),
+        "unverified": len(uncertainty_ids(active)),
+        "ai_needs_review": sum(d.source == "ai" and d.status == "needs_review" for d in active),
+        "ai_confirmed": sum(d.verified_by.startswith("ai") or d.source == "ai" for d in confirmed),
     }

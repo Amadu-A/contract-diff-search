@@ -20,6 +20,7 @@ def make_celery(settings: Settings) -> Celery:
         task_ignore_result=True,
         task_acks_late=True,
         worker_prefetch_multiplier=1,
+        worker_hijack_root_logger=False,
         task_reject_on_worker_lost=True,
         broker_connection_retry_on_startup=True,
         broker_connection_timeout=5,

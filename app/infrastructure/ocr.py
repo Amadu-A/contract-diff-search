@@ -218,12 +218,9 @@ class TesseractOCR:
                         row["verified"] = bool(
                             actual and actual.replace(" ", "") == row["text"].replace(" ", "")
                         )
-                        if not row["verified"]:
-                            row["confidence"] = min(row["confidence"], 0.64)
                 except DocumentError:
                     for row in rows:
                         row["verified"] = False
-                        row["confidence"] = min(row["confidence"], 0.64)
             # Повторное OCR локального числа другой конфигурацией; значения не исправляются по другой редакции.
             numeric = [
                 r
@@ -233,6 +230,7 @@ class TesseractOCR:
                     len(re.sub(r"\D", "", r["text"])) >= 8
                     or "%" in r["text"]
                     or r["confidence"] < 0.85
+                    or not r["verified"]
                 )
             ]
             for row in numeric[:200]:
@@ -256,12 +254,24 @@ class TesseractOCR:
                     row["verified"] = False
                     row["confidence"] = min(row["confidence"], 0.64)
                     continue
-                expected = re.sub(r"[^\d.,%]", "", row["text"])
-                actual = re.sub(r"[^\d.,%]", "", "".join(r["text"] for r in independent))
-                row["verified"] = bool(expected and expected == actual)
+                literal = "".join(r["text"] for r in independent)
+                expected = re.sub(r"[^\d.,%+\-−()]", "", row["text"])
+                actual = re.sub(r"[^\d.,%+\-−()]", "", literal)
+                pure_number = bool(re.fullmatch(r"\d+(?:[.,]\d+)*%?", row["text"]))
+                local_number = bool(re.fullmatch(r"\d+(?:[.,]\d+)*%?", literal))
+                quality = min((r["confidence"] for r in independent), default=0)
+                # Для числового токена независимый локальный проход точнее общего анализа строк.
+                # Смешанные идентификаторы дополнительно требуют согласия букв; знак не теряется.
+                row["verified"] = bool(
+                    expected
+                    and expected == actual
+                    and quality >= self.settings.ocr_min_confidence
+                    and (local_number if pure_number else row["verified"])
+                )
+                row["confidence"] = min(row["confidence"], quality)
+            for row in rows:
                 if not row["verified"]:
                     row["confidence"] = min(row["confidence"], 0.64)
-            for row in rows:
                 box = original_box(row["box"], angle, prepared.width, prepared.height)
                 row["box"] = original_box(
                     box, orientation, prepared.width, prepared.height, image.width, image.height

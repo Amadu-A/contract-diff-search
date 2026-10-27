@@ -11,6 +11,7 @@ import shutil
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 
@@ -18,11 +19,13 @@ import pytest
 import uvicorn
 from pypdf import PdfReader
 
+from app.application.ai_review import AILimits, AIReviewCoordinator
 from app.application.golden import validate_matrix
 from app.bootstrap import build_service
 from app.settings import ROOT
 from app.web.api import create_app
 from tests.factories import pdf
+from tests.unit.test_ai_review import Reviewer
 
 pytestmark = pytest.mark.browser
 
@@ -174,6 +177,112 @@ def test_invalid_file_and_api_error(live_server, browser_page, tmp_path):
     expect(page.locator("[data-start]")).to_be_enabled()
 
 
+@pytest.mark.parametrize(
+    "full,targeted,failure",
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, True, False),
+        (True, False, True),
+    ],
+)
+def test_ai_controls_and_visibility_export_without_recomparison(
+    live_server, browser_page, tmp_path, full, targeted, failure
+):
+    """Четыре комбинации флагов и выключение пометок меняют проекции и оба PDF, сохраняя статистику."""
+    from playwright.sync_api import expect
+
+    url, service = live_server
+    reviewer = Reviewer()
+    review = reviewer.review
+    failures = {"enabled": failure, "unit": None}
+
+    def review_with_failure(unit, old, new, attempt):
+        """Имитирует один адресный отказ при сохранении результатов остальных операций."""
+        from app.domain.models import VerificationError
+
+        failures["unit"] = failures["unit"] or unit.id
+        if failures["enabled"] and unit.id == failures["unit"]:
+            raise VerificationError("timeout")
+        return review(unit, old, new, attempt)
+
+    reviewer.review = review_with_failure
+    service.verifier = AIReviewCoordinator(reviewer, AILimits())
+    extract = service.extractor.extract
+    calls = []
+
+    def uncertain_extract(*args, **kwargs):
+        """Имитирует локальную неуверенность OCR одного абзаца настоящего PDF."""
+        model = extract(*args, **kwargs)
+        calls.append(model.name)
+        for element in model.elements:
+            if "Penalty" in element.text:
+                element.words = [
+                    replace(word, verified=False, confidence=0.4) for word in element.words
+                ]
+        return model
+
+    service.extractor.extract = uncertain_extract
+    page = browser_page
+    page.goto(url)
+    page.locator("[data-ai-full]").set_checked(full)
+    page.locator("[data-ai-unverified]").set_checked(targeted)
+    for side, percent in [("old", "70"), ("new", "50")]:
+        file = pdf(
+            tmp_path / f"{side}.pdf",
+            [f"2.2. Advance payment {percent}%.", f"5.2. Penalty {percent}%."],
+        )
+        page.locator(f"[data-upload={side}] [data-file-input]").set_input_files(str(file))
+    with page.expect_response(
+        lambda response: (
+            response.url == url + "/api/v1/comparisons" and response.request.method == "POST"
+        )
+    ) as accepted:
+        page.locator("[data-start]").click()
+    job = accepted.value.json()
+    assert (job["ai_full"], job["ai_unverified"]) == (full, targeted)
+    expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
+    expect(page.locator("[data-stat=total]")).to_have_text("1")
+    expect(page.locator("[data-stat=unverified]")).to_have_text("1")
+    expect(page.locator("[data-list-count]")).to_have_text("2")
+    if failure:
+        expect(page.locator("[data-ai-retry]")).to_be_visible()
+        calls_before_retry = len(calls)
+        failures["enabled"] = False
+        page.locator("[data-ai-retry]").click()
+        expect(page.locator("[data-cancel]")).to_be_visible()
+        expect(page.locator("[data-cancel]")).to_be_hidden(timeout=60000)
+        expect(page.locator("[data-ai-retry]")).to_be_hidden()
+        assert len(calls) == calls_before_retry
+    if full or targeted:
+        expect(page.locator("[data-ai-progress]")).to_be_visible()
+        page.locator("[data-ai-details]").click()
+        expect(page.locator("[data-ai-operations] p").first).to_be_visible()
+    before_calls = len(calls), len(reviewer.calls)
+    page.locator("[data-show-unverified-toggle]").uncheck()
+    expect(page.locator("[data-list-count]")).to_have_text("1")
+    expect(page.locator("[data-stat=unverified]")).to_have_text("1")
+    assert page.locator(".viewer__region--warning").count() == 0
+    for side in ("old", "new"):
+        link = page.locator(f"[data-viewer={side}] [data-export-pdf]")
+        expect(link).to_have_attribute("href", __import__("re").compile(r"show_unverified=false$"))
+        with page.expect_download() as download:
+            link.click()
+        output = tmp_path / f"{side}-clean.pdf"
+        download.value.save_as(str(output))
+        colors = {
+            tuple(float(n) for n in args)
+            for args, operator in PdfReader(output).pages[0].get_contents().operations
+            if operator in (b"RG", b"rg")
+        }
+        assert (0.85, 0.5, 0.05) not in colors
+        assert (0.42, 0.46, 0.51) in colors
+    page.locator("[data-show-unverified-toggle]").check()
+    expect(page.locator("[data-list-count]")).to_have_text("2")
+    assert (len(calls), len(reviewer.calls)) == before_calls
+
+
 @pytest.mark.real
 def test_real_contracts_matrix_and_visual_exports(live_server, browser_page, tmp_path):
     """Проверяет исходные договоры через UI и независимую матрицу, не публикуя их в Git."""
@@ -224,7 +333,8 @@ def test_real_contracts_matrix_and_visual_exports(live_server, browser_page, tmp
             and d["old_text"] == old_value
             and d["new_text"].replace(" ", "") == new_value
         )
-        index = next(i for i, d in enumerate(result["differences"]) if d["id"] == difference["id"])
+        visible = [d for d in result["differences"] if d.get("active", True)]
+        index = next(i for i, d in enumerate(visible) if d["id"] == difference["id"])
         page.locator(f'[data-index="{index}"]').click()
         expect(page.locator("[data-detail-old]")).to_have_text(old_value)
         for image in page.locator("[data-page-image]").all():

@@ -25,5 +25,14 @@ export function categoryLabel(category) {
     text_moved:'Перемещено',numbering_changed:'Нумерация',formatting_changed:'Оформление',
     table_modified:'Таблица',table_structure_changed:'Структура таблицы',structure_changed:'Структура',
     graphic_added:'Графика',graphic_deleted:'Графика',graphic_modified:'Графика',graphic_moved:'Графика',
-    ambiguous_match:'Неоднозначно',unverified_region:'Не проверено'})[category] || category;
+    ambiguous_match:'Неоднозначно',unverified_region:'Не проверено',ai_contradiction:'Противоречие ИИ'})[category] || category;
+}
+/** Проверяет предупреждение без изменения данных, их статусов и покрытия. */
+export function isUnverified(item) {
+  return item.active !== false && (['unverified','ambiguous'].includes(item.status) || ['unverified_region','ambiguous_match'].includes(item.category));
+}
+
+/** Применяет только визуальную настройку; подтверждённые изменения всегда остаются. */
+export function visibleDifference(item, showUnverified = true) {
+  return item.active !== false && (showUnverified || !isUnverified(item));
 }

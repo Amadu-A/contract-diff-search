@@ -39,6 +39,23 @@ class JsonFormatter(logging.Formatter):
             "elements",
             "unverified",
             "peak_memory_mb",
+            "ai_mode",
+            "unit_id",
+            "batch",
+            "completed",
+            "remaining",
+            "planned",
+            "attempt",
+            "exception_class",
+            "error_kind",
+            "http_status",
+            "timed_out",
+            "retrying",
+            "json_status",
+            "finish_reason",
+            "prompt_tokens",
+            "completion_tokens",
+            "phase",
         ):
             if hasattr(record, key):
                 data[key] = getattr(record, key)
