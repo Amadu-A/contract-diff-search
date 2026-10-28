@@ -15,8 +15,10 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 
+import httpx
 import pytest
 import uvicorn
+from pydantic import SecretStr
 from pypdf import PdfReader
 
 from app.application.ai_review import AILimits, AIReviewCoordinator
@@ -28,6 +30,63 @@ from tests.factories import pdf
 from tests.unit.test_ai_review import Reviewer
 
 pytestmark = pytest.mark.browser
+
+
+def test_external_bot_link_opens_ready_read_only_result(live_server, browser_page, tmp_path):
+    """Новый браузер открывает готовый результат, очищает fragment и сохраняет просмотр/экспорт."""
+    from playwright.sync_api import expect
+
+    base, service = live_server
+    settings = service.storage.settings
+    token = "synthetic-integration-secret-" + "z" * 40
+    settings.telegram_integration_token = SecretStr(token)
+    settings.public_base_url = base
+    data = [
+        pdf(tmp_path / f"{side}.pdf", [f"2.2. Advance payment {amount} percent."]).read_bytes()
+        for side, amount in (("old", 70), ("new", 50))
+    ]
+    with httpx.Client(base_url=base, headers={"Authorization": "Bearer " + token}) as bot:
+        response = bot.post(
+            "/api/v1/integrations/telegram/comparisons",
+            headers={"Idempotency-Key": "browser-request-001"},
+            files={"old": ("our.pdf", data[0]), "new": ("partner.pdf", data[1])},
+        )
+        assert response.status_code == 202, response.text
+        job_id = response.json()["job_id"]
+        endpoint = f"/api/v1/integrations/telegram/comparisons/{job_id}"
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            current = bot.get(endpoint).json()
+            if current["result_ready"]:
+                break
+            time.sleep(0.1)
+        assert current["result_ready"]
+        link = bot.post(endpoint + "/access-link").json()["url"]
+        assert bot.get(link).status_code == 200
+    errors = []
+    browser_page.on("pageerror", lambda error: errors.append(str(error)))
+    browser_page.goto(link)
+    expect(browser_page.locator('[data-stat="total"]')).to_have_text("1")
+    expect(browser_page.locator("[data-read-only-note]")).to_be_visible()
+    assert "ticket" not in browser_page.url and "#" not in browser_page.url
+    assert f"job={job_id}" in browser_page.url
+    expect(browser_page.locator("[data-reset]")).to_be_hidden()
+    expect(browser_page.locator("[data-delete]")).to_be_hidden()
+    expect(browser_page.locator("[data-start]")).to_be_hidden()
+    expect(browser_page.locator("[data-show-unverified-toggle]")).to_be_visible()
+    expect(browser_page.locator(".viewer__region--selected")).to_have_count(2)
+    assert browser_page.request.post(
+        f"{base}/api/v1/comparisons/{job_id}/ai/retry", headers={"X-Requested-With": "ContractDiff"}
+    ).status in {403, 404}
+    for side in ("old", "new"):
+        with browser_page.expect_download() as downloaded:
+            browser_page.locator(f"[data-viewer={side}] [data-export-pdf]").click()
+        path = tmp_path / f"download-{side}.pdf"
+        downloaded.value.save_as(path)
+        assert len(PdfReader(path).pages) == 1
+    browser_page.reload()
+    expect(browser_page.locator('[data-stat="total"]')).to_have_text("1")
+    assert not errors
 
 
 class TestPublisher:

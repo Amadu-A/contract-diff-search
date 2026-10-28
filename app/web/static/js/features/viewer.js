@@ -149,8 +149,7 @@ export class Viewer {
       const region = document.createElement('span');
       region.className = 'viewer__region';
       region.dataset.differenceId = item.id;
-      if (item.source === 'ai') region.classList.add('viewer__region--ai');
-      if (item.source === 'ai' && item.status !== 'confirmed') region.classList.add('viewer__region--review');
+      if (item.status === 'needs_review') region.classList.add('viewer__region--review');
       if (item.category.endsWith('_added')) region.classList.add('viewer__region--added');
       if (['unverified_region','ambiguous_match'].includes(item.category) || item.status === 'unverified') region.classList.add('viewer__region--warning');
       if (item.id === this.selected) region.classList.add('viewer__region--selected');

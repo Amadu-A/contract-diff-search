@@ -1,5 +1,5 @@
 # tests/integration/test_export_visibility.py
-"""Два варианта PDF/DOCX: предупреждения скрываются, факты и отдельный стиль ИИ остаются."""
+"""Два варианта PDF/DOCX: предупреждения скрываются, подтверждённые ИИ-факты имеют общую заливку."""
 
 import hashlib
 import shutil
@@ -36,6 +36,8 @@ def test_exports_keep_confirmed_and_ai_markers_but_hide_only_warnings(settings, 
         for p, side in zip(paths, ("old", "new"), strict=True)
     ]
     result = compare(*versions)
+    result.differences[0].source = "ai"
+    result.differences[0].verified_by = "ai_visual"
     for identifier, status, source, value in [
         ("warning", "unverified", "deterministic", "Advance"),
         ("ai", "needs_review", "ai", "payment"),
@@ -90,7 +92,7 @@ def test_exports_keep_confirmed_and_ai_markers_but_hide_only_warnings(settings, 
 
 @pytest.mark.parametrize("status", ["needs_review", "confirmed"])
 def test_ai_pdf_fill_is_reserved_for_independently_confirmed_findings(settings, tmp_path, status):
-    """Неподтверждённая область имеет только пунктирный контур, подтверждённая — контур с заливкой."""
+    """Гипотеза имеет только контур; подтверждённое ИИ-изменение — обычную серую заливку."""
     extractor = PdfDocumentExtractor(settings, TesseractOCR(settings), LibreOffice(settings))
     models = [
         extractor.extract(
@@ -107,9 +109,9 @@ def test_ai_pdf_fill_is_reserved_for_independently_confirmed_findings(settings, 
     result.differences[0].source = "ai"
     result.differences[0].status = status
     artifacts = DocumentExporter(LibreOffice(settings)).export(result, tmp_path, lambda stage: None)
-    operators = [
-        operator
-        for _, operator in PdfReader(artifacts["new"][0].path).pages[0].get_contents().operations
-    ]
-    assert (b"B*" in operators or b"B" in operators) == (status == "confirmed")
+    operations = PdfReader(artifacts["new"][0].path).pages[0].get_contents().operations
+    operators = [operator for _, operator in operations]
+    colors = {tuple(float(n) for n in args) for args, operator in operations if operator == b"rg"}
+    assert ((0.42, 0.46, 0.51) in colors) == (status == "confirmed")
+    assert (b"f*" in operators or b"f" in operators) == (status == "confirmed")
     assert (b"S" in operators) == (status == "needs_review")

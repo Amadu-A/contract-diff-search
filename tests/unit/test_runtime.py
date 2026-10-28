@@ -7,9 +7,19 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from app import worker_health
 from app.runtime import configure_native_threads
+from app.settings import Settings
+
+
+def test_invalid_integration_secret_is_not_reflected_in_configuration_error():
+    """Ошибки запуска из-за слабого секрета не включают его значение в диагностический текст."""
+    secret = "private-short-value"
+    with pytest.raises(ValidationError) as failure:
+        Settings(_env_file=None, telegram_integration_token=secret)
+    assert secret not in str(failure.value)
 
 
 def test_native_limits_override_inherited_excessive_values(settings, monkeypatch):

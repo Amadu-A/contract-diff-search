@@ -66,19 +66,15 @@ def _pdf_export(
                 raise DocumentError("Не подтверждены координаты PDF-экспорта")
             warning = is_unverified({"category": category, "status": status})
             drawing.saveState()
-            if source == "ai":
+            if source == "ai" and status != "confirmed":
                 drawing.setStrokeColorRGB(0.48, 0.25, 0.8)
-                confirmed_ai = status == "confirmed" and not warning
-                if confirmed_ai:
-                    drawing.setFillColorRGB(0.65, 0.45, 0.9)
-                    drawing.setFillAlpha(0.12)
                 drawing.setDash(1, 2)
                 drawing.rect(
                     region.x0,
                     height - region.y1,
                     region.x1 - region.x0,
                     region.y1 - region.y0,
-                    fill=int(confirmed_ai),
+                    fill=0,
                     stroke=1,
                 )
             elif warning:
@@ -220,7 +216,12 @@ class DocumentExporter:
 
     @timed("document_export")
     def export(
-        self, result: ComparisonResult, output: Path, checkpoint: Callable[[str], None]
+        self,
+        result: ComparisonResult,
+        output: Path,
+        checkpoint: Callable[[str], None],
+        *,
+        include_word: bool = True,
     ) -> dict[str, list[ExportArtifact]]:
         """Создаёт оба варианта из одного результата; переключение не запускает OCR или сравнение."""
         artifacts = {"old": [], "new": []}
@@ -233,6 +234,16 @@ class DocumentExporter:
                     ExportArtifact("pdf", str(pdf), show_unverified=show_unverified)
                 )
                 if version.format not in {"doc", "docx"}:
+                    continue
+                if not include_word:
+                    artifacts[side].append(
+                        ExportArtifact(
+                            version.format,
+                            None,
+                            "Word-экспорт готовится после завершения ИИ-проверки",
+                            show_unverified,
+                        )
+                    )
                     continue
                 try:
                     target = self._word(result, side, output, checkpoint, show_unverified)
@@ -260,6 +271,8 @@ class DocumentExporter:
             element = by_id.get(getattr(difference, side + "_element"))
             text = getattr(difference, side + "_text")
             areas = getattr(difference, side + "_regions")
+            if not areas and not text:
+                continue
             if element is None:
                 if areas and (
                     text or is_unverified(difference) or difference.category.startswith("graphic_")
@@ -286,7 +299,7 @@ class DocumentExporter:
             ranges[key].append((start, end))
             color, priority = (
                 ("E5D9FF", 2)
-                if difference.source == "ai"
+                if difference.source == "ai" and difference.status != "confirmed"
                 else ("FFF0D0", 1)
                 if is_unverified(difference)
                 else ("D4D8DE", 3)

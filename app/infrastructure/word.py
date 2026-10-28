@@ -317,11 +317,24 @@ def read_docx(path: Path) -> list[DocumentElement]:
                     attrs["row_key"] = "".join(first.itertext())[:120] if first is not None else ""
                     attrs["cell_path"] = root.getroottree().getpath(cell)
                 links = [
-                    rels.get(link.get(f"{{{NS['r']}}}id"), "")
+                    "#" + link.get(tag("anchor"))
+                    if link.get(tag("anchor"))
+                    else rels.get(link.get(f"{{{NS['r']}}}id"), "")
                     for link in paragraph.findall(".//w:hyperlink", NS)
                 ]
                 if links:
                     attrs["hyperlinks"] = "\n".join(links)
+                fields = [node.text or "" for node in paragraph.findall(".//w:instrText", NS)]
+                fields.extend(
+                    node.get(tag("instr"), "") for node in paragraph.findall(".//w:fldSimple", NS)
+                )
+                fields.extend(
+                    "hidden:" + "".join(run.itertext())
+                    for run in paragraph.findall(".//w:r", NS)
+                    if run.find("w:rPr/w:vanish", NS) is not None
+                )
+                if fields:
+                    attrs["hidden_fields"] = "\n".join(fields)
                 result.append(
                     DocumentElement(
                         f"E{len(result):06d}",

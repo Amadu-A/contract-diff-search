@@ -19,8 +19,28 @@ from app.domain.models import (
 class JobRepository(Protocol):
     """Атомарные переходы состояния и временная аренда задания одним worker."""
 
-    def create(self, job: ComparisonJob, max_jobs: int, max_session_jobs: int) -> None:
+    def create(
+        self, job: ComparisonJob, max_jobs: int, max_session_jobs: int
+    ) -> ComparisonJob | None:
         """Создаёт задание, проверяя общую и сессионную квоты одной транзакцией."""
+        ...
+
+    def rate_limit(self, scope: str, maximum: int, now: float) -> bool:
+        """Ограничивает частоту запросов клиента атомарным временным счётчиком."""
+        ...
+
+    def create_access(
+        self, job_id: str, owner: str, digest: str, expires: float, now: float
+    ) -> float:
+        """Сохраняет защищённый одноразовый билет в пределах TTL завершённого результата."""
+        ...
+
+    def activate_access(self, digest: str, session_digest: str, now: float) -> tuple[str, float]:
+        """Однократно обменивает билет на отдельное право чтения одного задания."""
+        ...
+
+    def can_view(self, job_id: str, digest: str, now: float) -> bool:
+        """Проверяет ограниченную браузерную сессию без выдачи права изменения."""
         ...
 
     def get(self, job_id: str) -> ComparisonJob | None:
@@ -115,7 +135,12 @@ class Exporter(Protocol):
     """Формирует отдельные проверенные PDF и безопасные Word-копии."""
 
     def export(
-        self, result: ComparisonResult, output: Path, checkpoint: Callable[[str], None]
+        self,
+        result: ComparisonResult,
+        output: Path,
+        checkpoint: Callable[[str], None],
+        *,
+        include_word: bool = True,
     ) -> dict[str, list[ExportArtifact]]:
         """Сохраняет экспорты, сообщая причину недоступности каждого Word-формата."""
         ...

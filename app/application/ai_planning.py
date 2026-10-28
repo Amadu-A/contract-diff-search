@@ -170,7 +170,17 @@ def full_plan(
         a, b = [old[i] for i in match.old], [new[i] for i in match.new]
         used_old.update(match.old)
         used_new.update(match.new)
-        units.extend(make_units("full", _kind(a + b), a, b, context_chars))
+        units.extend(
+            make_units(
+                "full",
+                _kind(a + b),
+                a,
+                b,
+                context_chars,
+                old_regions=match.old_regions or None,
+                new_regions=match.new_regions or None,
+            )
+        )
     for side, source, other, used in (
         ("old", result.old, result.new, used_old),
         ("new", result.new, result.old, used_new),
@@ -244,7 +254,21 @@ def unverified_plan(
     """Планирует все оставшиеся корневые неопределённости, начиная с OCR и геометрии."""
     groups = defaultdict(list)
     for difference in result.differences:
-        if is_unverified(difference):
+        if difference.unverified_reason == "unsupported_property":
+            continue
+        if (
+            is_unverified(difference)
+            or difference.active
+            and difference.category == "ai_contradiction"
+        ):
+            if not difference.unverified_reason:
+                difference.unverified_reason = (
+                    "conflicting_evidence"
+                    if difference.category == "ai_contradiction"
+                    else "missing_geometry"
+                    if not (difference.old_regions or difference.new_regions)
+                    else "mapping_not_found"
+                )
             groups[difference.uncertainty_id or difference.id].append(difference)
     old, new = {e.id: e for e in result.old.elements}, {e.id: e for e in result.new.elements}
     ranked = []
@@ -273,19 +297,123 @@ def unverified_plan(
             kind = "correspondence"
         elif graphic:
             kind = "graphic"
+        if any(d.category == "ai_contradiction" for d in differences):
+            kind = "conflict"
         priority = {"ocr": 0, "correspondence": 1, "table": 2, "graphic": 3, "number": 4}.get(
             kind, 5
         )
-        ar = ([] if graphic else element_regions(a)) or list(
-            dict.fromkeys(r for d in differences for r in d.old_regions)
+        ar = list(dict.fromkeys(r for d in differences for r in d.old_regions)) or (
+            [] if graphic else element_regions(a)
         )
-        br = ([] if graphic else element_regions(b)) or list(
-            dict.fromkeys(r for d in differences for r in d.new_regions)
+        br = list(dict.fromkeys(r for d in differences for r in d.new_regions)) or (
+            [] if graphic else element_regions(b)
         )
-        units = _make_units("unverified", kind, a, b, context_chars, [root], ar, br, region_limit)
+        broad = len(differences) > 1 or any(d.category == "unverified_region" for d in differences)
+        if broad and not graphic:
+            ar, br = element_regions(a) or ar, element_regions(b) or br
+        ar, br = _joined(ar), _joined(br)
+        fallback = not ar and bool(a) or not br and bool(b)
+        if not ar and a:
+            ar = _context_regions(a, result.old)
+        if not br and b:
+            br = _context_regions(b, result.new)
+        proof = result.ai_review.covered_regions.get(root, {})
+        ar = _remaining(ar, proof.get("old", []))
+        br = _remaining(br, proof.get("new", []))
+        units = _make_units(
+            "unverified", kind, a, b, context_chars, [root], ar, br, 1 if fallback else region_limit
+        )
         ranked.append((priority, root, units))
     return [
         unit
         for _, _, units in sorted(ranked, key=lambda entry: (entry[0], entry[1]))
         for unit in units
     ]
+
+
+def _remaining(areas, covered):
+    """Планирует остаток больших областей после проверенных дочерних участков, не повторяя их."""
+    for proof in covered:
+        pending = []
+        for area in areas:
+            x0, y0, x1, y1 = (
+                max(area.x0, proof.x0),
+                max(area.y0, proof.y0),
+                min(area.x1, proof.x1),
+                min(area.y1, proof.y1),
+            )
+            if area.page != proof.page or x0 >= x1 or y0 >= y1:
+                pending.append(area)
+                continue
+            pending.extend(
+                VisualRegion(area.page, *box)
+                for box in (
+                    (area.x0, area.y0, area.x1, y0),
+                    (area.x0, y1, area.x1, area.y1),
+                    (area.x0, y0, x0, y1),
+                    (x1, y0, area.x1, y1),
+                )
+                if box[0] < box[2] and box[1] < box[3]
+            )
+        areas = pending
+    return areas
+
+
+def _context_regions(elements, document):
+    """Выбирает кропы между измеренными соседями; без опор проверяет исходные страницы по очереди."""
+    areas = []
+    for element in elements:
+        index = document.elements.index(element)
+        column = element.attributes.get("column")
+        neighbors = [
+            e
+            for e in document.elements
+            if e.words and (column is None or e.attributes.get("column") == column)
+        ]
+        before = next((e for e in reversed(document.elements[:index]) if e in neighbors), None)
+        after = next((e for e in document.elements[index + 1 :] if e in neighbors), None)
+        first = before.words[-1].region.page if before else 1
+        last = after.words[0].region.page if after else len(document.pages)
+        for page in document.pages:
+            if not min(first, last) <= page.number <= max(first, last):
+                continue
+            if before and after and first == last:
+                words = [
+                    w.region for e in neighbors for w in e.words if w.region.page == page.number
+                ]
+                top = min(w.region.y0 for w in before.words if w.region.page == page.number)
+                bottom = max(w.region.y1 for w in after.words if w.region.page == page.number)
+                areas.append(
+                    VisualRegion(
+                        page.number,
+                        max(0, min(w.x0 for w in words) - 5),
+                        max(0, min(top, bottom) - 3),
+                        min(page.width, max(w.x1 for w in words) + 5),
+                        min(page.height, max(top, bottom) + 3),
+                    )
+                )
+            else:
+                areas.append(VisualRegion(page.number, 0, 0, page.width, page.height))
+    return list(dict.fromkeys(areas))
+
+
+def _joined(areas):
+    """Объединяет измеренные соседние символы/слова одной строки в читаемый исходный кроп."""
+    joined = []
+    for area in sorted(areas, key=lambda r: (r.page, r.y0, r.x0)):
+        for index, previous in enumerate(joined):
+            overlap = min(area.y1, previous.y1) - max(area.y0, previous.y0)
+            height = min(area.y1 - area.y0, previous.y1 - previous.y0)
+            gap = max(area.x0, previous.x0) - min(area.x1, previous.x1)
+            if area.page == previous.page and overlap >= height / 2 and gap <= max(6, height):
+                joined[index] = VisualRegion(
+                    area.page,
+                    min(area.x0, previous.x0),
+                    min(area.y0, previous.y0),
+                    max(area.x1, previous.x1),
+                    max(area.y1, previous.y1),
+                )
+                break
+        else:
+            joined.append(area)
+    return joined

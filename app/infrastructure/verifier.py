@@ -57,6 +57,10 @@ class FindingSchema(BaseModel):
     new_ref: str = Field("", pattern=r"^(?:n\d+)?$")
     reason: str = Field("", max_length=1000)
     confidence: float = Field(0, ge=0, le=1)
+    mapping_confirmed: bool = False
+    mapping_reason: str = Field("", max_length=1000)
+    covers_region: bool = False
+    absence_confirmed: bool = False
 
 
 class ResponseSchema(BaseModel):
@@ -193,8 +197,22 @@ class SharedVlmVerifier:
             ],
             "old_elements": unit.old_elements,
             "new_elements": unit.new_elements,
+            **{
+                side + "_structure": [
+                    {
+                        "id": e.id,
+                        "section": e.section,
+                        "kind": e.kind,
+                        "column": e.attributes.get("column"),
+                        "party": e.attributes.get("party"),
+                    }
+                    for e in version.elements
+                    if e.id in getattr(unit, side + "_elements")
+                ]
+                for side, version in (("old", old), ("new", new))
+            },
         }
-        images, observations = [], {}
+        images, observations, visual_refs = [], {}, []
         for side, version in (("old", old), ("new", new)):
             visual, extra = self._visuals(unit, version, side, budget)
             observations[side] = extra
@@ -203,6 +221,10 @@ class SharedVlmVerifier:
                     : self.settings.vlm_context_chars
                 ]
             if visual:
+                prefix = "o" if side == "old" else "n"
+                visual_refs.extend(
+                    f"{prefix}{index}" for index in range(len(getattr(unit, side + "_regions")))
+                )
                 images.append({"type": "image_url", "image_url": {"url": visual}})
         request = {
             "model": self.settings.shared_vlm_model,
@@ -293,7 +315,14 @@ class SharedVlmVerifier:
             if not isinstance(text, str) or not text.strip():
                 raise VerificationError("empty_content", retryable=True)
             parsed = ResponseSchema.model_validate_json(text)
+            unchanged = [finding for finding in parsed.findings if finding.category == "unchanged"]
+            parsed.findings = [
+                finding for finding in parsed.findings if finding.category != "unchanged"
+            ]
+            parsed.evidence.extend(unchanged)
             if parsed.outcome == "different" and not parsed.findings:
+                raise VerificationError("invalid_semantic_response", retryable=True)
+            if parsed.outcome == "same" and parsed.findings:
                 raise VerificationError("invalid_semantic_response", retryable=True)
             return AIReply(
                 parsed.outcome,
@@ -303,6 +332,7 @@ class SharedVlmVerifier:
                 parsed.complete,
                 observations["old"],
                 observations["new"],
+                visual_refs,
             )
         except VerificationError:
             raise

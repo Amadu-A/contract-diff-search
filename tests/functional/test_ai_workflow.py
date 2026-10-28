@@ -2,7 +2,7 @@
 """Новые режимы API, повтор без OCR и независимое скрытие предупреждений во всех проекциях."""
 
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -10,10 +10,53 @@ from app.application.ai_review import AILimits, AIReviewCoordinator
 from app.application.queries import filter_differences, page_regions, summary
 from app.domain.models import Difference
 from tests.factories import pdf
+from tests.fakes import FakeExporter
 from tests.functional.test_lifecycle import upload
-from tests.unit.test_ai_review import Reviewer, uncertain_result
+from tests.unit.test_ai_review import Reviewer, uncertain_result, visual_reply
 
 pytest_plugins = ("tests.functional.test_lifecycle",)
+
+
+def test_accepted_visual_checkpoint_updates_statistics_and_pdf_before_final_word(
+    client, service, tmp_path
+):
+    """Принятие ИИ обновляет экспорт на checkpoint без повторного извлечения и без частых Word-конвертаций."""
+    from app.domain.comparison import statistics
+
+    observations = []
+
+    class Exporter(FakeExporter):
+        """Наблюдает содержимое действующего порта экспорта, не заменяя сценарий обработки."""
+
+        def export(self, result, output, checkpoint, *, include_word=True):
+            """Записывает фактическую матрицу, поступившую при промежуточном и окончательном экспорте."""
+            observations.append((include_word, statistics(result.differences)))
+            return super().export(result, output, checkpoint, include_word=include_word)
+
+    class Visual:
+        """Отвечает как порт, получивший исходные изображения неопределённого числового фрагмента."""
+
+        def review(self, unit, old, new, attempt):
+            """Возвращает локализованное визуальное изменение с независимым установлением соответствия."""
+            return visual_reply(unit, "number_modified", "70%", "50%")
+
+    service.extractor.new.elements[0].words = [
+        replace(word, verified=False, confidence=0.3)
+        for word in service.extractor.new.elements[0].words
+    ]
+    service.exporter = Exporter()
+    service.verifier = AIReviewCoordinator(Visual(), AILimits())
+    job = upload(client, tmp_path, True).json()
+    service.process(job["id"])
+    result = client.get(f"/api/v1/comparisons/{job['id']}/result").json()
+    assert observations[0][1]["total"] == 0
+    assert any(
+        not word and stats["total"] == 1 and stats["unverified"] == 0
+        for word, stats in observations
+    )
+    assert observations[-1][0] is True
+    assert result["statistics"]["ai_confirmed"] == 1 and result["statistics"]["unverified"] == 0
+    assert service.extractor.calls == 2
 
 
 @pytest.mark.parametrize(

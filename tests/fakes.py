@@ -39,7 +39,7 @@ class FakeExtractor:
 class FakeExporter:
     """Сохраняет контракт артефактов без имитации готового PDF-файла."""
 
-    def export(self, result, output, checkpoint):
+    def export(self, result, output, checkpoint, *, include_word=True):
         """Сообщает недоступность, вместо выдачи пустого фиктивного экспорта."""
         checkpoint("Тестовая подготовка экспорта")
         return {

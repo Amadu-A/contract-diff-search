@@ -77,6 +77,7 @@ def test_visual_request_bounds_images_and_preserves_real_ocr_coordinates(
         unit, document, document, attempt=1
     )
     assert len(calls) == 4
+    assert reply.visual_refs == ["o0", "o1", "o2", "n0"]
     if ocr_fails:
         assert not reply.old_evidence
     else:
@@ -212,3 +213,34 @@ def test_transport_errors_are_safe_and_retryable(settings, error, expected):
         )
     assert failure.value.kind == expected and failure.value.retryable
     assert "PRIVATE" not in str(failure.value)
+
+
+@pytest.mark.parametrize("category", ["unchanged", "number_modified"])
+def test_same_response_normalizes_matches_but_rejects_actual_contradiction(settings, category):
+    """Совпадения в findings принимаются как evidence, реальные изменения при outcome=same отклоняются."""
+    answer = {
+        "outcome": "same",
+        "readable": True,
+        "findings": [
+            {
+                "category": category,
+                "old_value": "70%",
+                "new_value": "70%",
+                "old_ref": "o0",
+                "new_ref": "n0",
+            }
+        ],
+    }
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200, json={"choices": [{"message": {"content": json.dumps(answer)}}]}
+        )
+    )
+    reviewer = SharedVlmVerifier(settings, transport)
+    if category == "unchanged":
+        reply = reviewer.review(ReviewUnit("U", "full", "text"), version([]), version([]))
+        assert not reply.findings and len(reply.evidence) == 1
+        assert reply.visual_refs == []
+    else:
+        with pytest.raises(VerificationError, match="invalid_semantic_response"):
+            reviewer.review(ReviewUnit("U", "full", "text"), version([]), version([]))

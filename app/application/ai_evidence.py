@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import dataclass
 
 from app.domain.comparison import regions
-from app.domain.models import ComparisonResult, Difference, ReviewUnit, VisualRegion
+from app.domain.models import ComparisonResult, Difference, ElementMatch, ReviewUnit, VisualRegion
 from app.domain.text import normalize
 from app.domain.visibility import is_unverified, uncertainty_ids
 
@@ -124,105 +124,276 @@ def _duplicate(existing: Difference, new: Difference) -> bool:
     return texts and (same or geometry)
 
 
-def _corresponds(result, old_element, new_element):
-    """Требует независимого структурного соответствия и не смешивает разные колонки сторон договора."""
-    if not old_element or not new_element:
-        return False
-    a = next(e for e in result.old.elements if e.id == old_element)
-    b = next(e for e in result.new.elements if e.id == new_element)
-    left, right = a.attributes.get("column"), b.attributes.get("column")
-    if left is not None and right is not None and left != right:
-        return False
-    return any(
-        old_element in match.old and new_element in match.new and match.confidence >= 0.7
-        for match in result.matches
+def _compatible(result, old_element, new_element, *, visual=False):
+    """Контролирует известные стороны договора без требования прежнего алгоритмического match."""
+    a = next((e for e in result.old.elements if e.id == old_element), None)
+    b = next((e for e in result.new.elements if e.id == new_element), None)
+    if a is None or b is None:
+        return True
+    return all(
+        a.attributes.get(key) is None
+        or b.attributes.get(key) is None
+        or a.attributes[key] == b.attributes[key]
+        for key in (("party",) if visual else ("column", "party"))
     )
 
 
-def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
-    """Сохраняет подтверждённые алгоритмы и добавляет только локализованные независимые замечания."""
-    unit.old_evidence, unit.new_evidence = reply.old_evidence, reply.new_evidence
-    if (
-        reply.outcome == "same"
-        and reply.complete
-        and reply.readable
-        and unit.kind not in {"correspondence", "coverage"}
+def _visual_anchor(result, unit, side, value, quote, reference):
+    """Проверяет принадлежность исходного ref странице отдельно от правильности OCR."""
+    areas = _reference_regions(
+        getattr(unit, side + "_regions"), reference, "o" if side == "old" else "n"
+    )
+    version = getattr(result, side)
+    if not areas:
+        return None
+    region = areas[0]
+    page = next((p for p in version.pages if p.number == region.page), None)
+    if not page or not (
+        0 <= region.x0 < region.x1 <= page.width and 0 <= region.y0 < region.y1 <= page.height
     ):
+        return None
+    located = anchor(result, unit, side, value, quote, reference)
+    if located:
+        return located
+    elements = [
+        e
+        for e in version.elements
+        if e.id in getattr(unit, side + "_elements")
+        and any(_overlap(w.region, region) for w in e.words)
+    ]
+    return Anchor(elements[0].id if len(elements) == 1 else None, None, areas, False)
+
+
+def _covered(required, supplied):
+    """Проверяет объединение дочерних прямоугольников, включая разрывы между ними."""
+    for area in required:
+        pieces = [r for r in supplied if _overlap(r, area)]
+        xs = sorted(
+            {
+                area.x0,
+                area.x1,
+                *(max(area.x0, min(area.x1, x)) for r in pieces for x in (r.x0, r.x1)),
+            }
+        )
+        covered = 0
+        for x0, x1 in zip(xs, xs[1:], strict=False):
+            intervals = sorted(
+                (max(area.y0, r.y0), min(area.y1, r.y1))
+                for r in pieces
+                if r.x0 <= x0 and r.x1 >= x1
+            )
+            top, length = area.y0, 0
+            for y0, y1 in intervals:
+                length += max(0, y1 - max(top, y0))
+                top = max(top, y1)
+            covered += (x1 - x0) * length
+        if covered + 1e-6 < (area.x1 - area.x0) * (area.y1 - area.y0):
+            return False
+    return bool(required)
+
+
+def _resolve(result, unit, observation, a, b, same, visual):
+    """Накапливает проверенные части и снимает родительское предупреждение после полного покрытия."""
+    for warning in result.differences:
+        root = warning.uncertainty_id or warning.id
+        if not is_unverified(warning) or warning.unverified_reason == "unsupported_property":
+            continue
+        if unit.targets and root not in unit.targets:
+            continue
+        localized = any(
+            _overlap(r, area)
+            for side, located in (("old", a), ("new", b))
+            for r in getattr(warning, side + "_regions")
+            for area in located.areas
+        )
+        if not localized:
+            continue
+        if same and any(
+            d.active
+            and d.status == "confirmed"
+            and d.source == "deterministic"
+            and any(
+                _overlap(r, area)
+                for side, located in (("old", a), ("new", b))
+                for r in getattr(d, side + "_regions")
+                for area in located.areas
+            )
+            for d in result.differences
+        ):
+            warning.unverified_reason = "conflicting_evidence"
+            continue
+        literal_scope = all(
+            not getattr(warning, side + "_text")
+            or normalize(getattr(warning, side + "_text")).text
+            == normalize(getattr(observation, side + "_value")).text
+            for side in ("old", "new")
+        )
+        local_fact = (
+            visual
+            and warning.category not in {"unverified_region", "ambiguous_match"}
+            and all(
+                not getattr(warning, side + "_regions")
+                or _covered(getattr(warning, side + "_regions"), located.areas)
+                for side, located in (("old", a), ("new", b))
+            )
+        )
+        if not observation.covers_region and not literal_scope and not local_fact:
+            continue
+        evidence = result.ai_review.covered_regions.setdefault(root, {"old": [], "new": []})
+        for side, located in (("old", a), ("new", b)):
+            areas = (
+                _reference_regions(
+                    getattr(unit, side + "_regions"),
+                    getattr(observation, side + "_ref"),
+                    "o" if side == "old" else "n",
+                )
+                if observation.covers_region and visual
+                else located.areas
+            )
+            if literal_scope and not visual and located.verified:
+                areas = getattr(warning, side + "_regions")
+            evidence[side] = list(dict.fromkeys([*evidence[side], *areas]))
+        required = {side: getattr(warning, side + "_regions") for side in ("old", "new")}
+        if not any(required.values()) or not all(
+            not required[side] or _covered(required[side], evidence[side])
+            for side in ("old", "new")
+        ):
+            warning.unverified_reason = "partial_coverage"
+            continue
+        warning.active = False
+        warning.verified_by = "ai_visual" if visual else "ai_and_independent_text"
+        result.ai_review.resolutions[root] = "same" if same else "different"
+        for side in ("old", "new"):
+            identifier = getattr(warning, side + "_element")
+            if identifier:
+                changed = not same or any(
+                    d.active
+                    and d.status == "confirmed"
+                    and getattr(d, side + "_element") == identifier
+                    for d in result.differences
+                )
+                getattr(result.coverage, side)[identifier] = "changed" if changed else "unchanged"
+
+
+def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
+    """Принимает самостоятельное визуальное доказательство ИИ и сохраняет происхождение факта."""
+    unit.old_evidence, unit.new_evidence = reply.old_evidence, reply.new_evidence
+    unit.visual_refs = reply.visual_refs
+    if reply.outcome == "same" and reply.complete and reply.readable and unit.kind != "coverage":
         _record_contradiction(result, unit)
     _resolve_refined_same(result, unit, reply)
-    resolved = set()
     for observation in [*reply.findings, *reply.evidence]:
-        a = anchor(
+        a = _visual_anchor(
             result, unit, "old", observation.old_value, observation.old_quote, observation.old_ref
         )
-        b = anchor(
+        b = _visual_anchor(
             result, unit, "new", observation.new_value, observation.new_quote, observation.new_ref
         )
         same = observation.category == "unchanged"
+        addition = observation.category.endswith("_added")
+        deletion = observation.category.endswith("_deleted")
+        visual = bool(
+            a
+            and b
+            and observation.mapping_confirmed
+            and observation.mapping_reason.strip()
+            and observation.confidence >= 0.8
+            and observation.old_ref in reply.visual_refs
+            and observation.new_ref in reply.visual_refs
+            and (
+                observation.category.startswith("graphic_")
+                or all(
+                    not value or normalize(value).text in normalize(quote).text
+                    for value, quote in (
+                        (observation.old_value, observation.old_quote),
+                        (observation.new_value, observation.new_quote),
+                    )
+                )
+            )
+        )
+        independent = bool(a and b and a.verified and b.verified and not addition and not deletion)
         confirmed = bool(
-            reply.readable
+            reply.complete
+            and reply.readable
+            and reply.outcome != "uncertain"
             and a
             and b
-            and a.verified
-            and b.verified
-            and _corresponds(result, a.element, b.element)
+            and _compatible(result, a.element, b.element, visual=visual)
+            and (visual or independent)
         )
-        if observation.category in {"unverified_region", "text_added", "text_deleted"}:
-            confirmed = False
-        if same:
+        if addition or deletion:
+            confirmed = (
+                confirmed
+                and visual
+                and observation.absence_confirmed
+                and observation.covers_region
+                and bool(observation.new_value if addition else observation.old_value)
+                and not (observation.old_value if addition else observation.new_value)
+            )
+        elif same:
             confirmed = (
                 confirmed
                 and normalize(observation.old_value).text == normalize(observation.new_value).text
+                and bool(observation.old_value)
+            )
+        elif observation.category in {
+            "formatting_changed",
+            "text_moved",
+            "table_structure_changed",
+            "structure_changed",
+            "graphic_modified",
+        }:
+            confirmed = (
+                confirmed and visual and bool(observation.old_value) and bool(observation.new_value)
             )
         else:
             confirmed = (
                 confirmed
                 and normalize(observation.old_value).text != normalize(observation.new_value).text
             )
-        if same and confirmed:
-            for difference in result.differences:
-                root = difference.uncertainty_id or difference.id
-                if not is_unverified(difference) or (unit.targets and root not in unit.targets):
-                    continue
-                # Общее предупреждение абзаца снимается только при проверке всего его содержания.
-                if difference.category == "unverified_region":
-                    old_text, new_text = (
-                        normalize(difference.old_text).text,
-                        normalize(difference.new_text).text,
-                    )
-                    covers = (
-                        not old_text or old_text == normalize(observation.old_value).text
-                    ) and (not new_text or new_text == normalize(observation.new_value).text)
-                else:
-                    covers = (
-                        difference.old_text == observation.old_value
-                        and difference.new_text == observation.new_value
-                    )
-                localized = (
-                    not difference.old_element or difference.old_element == a.element
-                ) and (not difference.new_element or difference.new_element == b.element)
-                if covers and localized and (difference.old_text or difference.new_text):
-                    difference.active = False
-                    resolved.add(root)
-                    result.ai_review.resolutions[root] = "same"
-                    for side, located in (("old", a), ("new", b)):
-                        if located.element:
-                            getattr(result.coverage, side)[located.element] = "unchanged"
-            continue
+        if observation.category == "unverified_region":
+            confirmed = False
         if same:
+            if confirmed:
+                if any(
+                    d.active
+                    and d.source == "deterministic"
+                    and d.status == "confirmed"
+                    and any(
+                        _overlap(r, area)
+                        for side, located in (("old", a), ("new", b))
+                        for r in getattr(d, side + "_regions")
+                        for area in located.areas
+                    )
+                    for d in result.differences
+                ):
+                    continue
+                _save_mapping(result, unit, observation, a, b, same=True)
+                unit.verified_by = "ai_visual" if visual else "ai_and_independent_text"
+                _resolve(result, unit, observation, a, b, True, visual)
             continue
-        ar = a.areas if a else _reference_regions(unit.old_regions, observation.old_ref, "o")
-        br = b.areas if b else _reference_regions(unit.new_regions, observation.new_ref, "n")
+        ar = (
+            []
+            if addition
+            else a.areas
+            if a
+            else _reference_regions(unit.old_regions, observation.old_ref, "o")
+        )
+        br = (
+            []
+            if deletion
+            else b.areas
+            if b
+            else _reference_regions(unit.new_regions, observation.new_ref, "n")
+        )
         fingerprint = (
-            unit.mode,
             observation.category,
             observation.old_value,
             observation.new_value,
             [(r.page, r.x0, r.y0, r.x1, r.y1) for r in ar + br],
         )
-        identifier = "AI" + hashlib.sha256(repr(fingerprint).encode()).hexdigest()[:16]
         candidate = Difference(
-            identifier,
+            "AI" + hashlib.sha256(repr(fingerprint).encode()).hexdigest()[:16],
             observation.category,
             "ИИ: найдено различие" if confirmed else "ИИ: требуется проверка",
             observation.old_value,
@@ -231,72 +402,148 @@ def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
             new_regions=br,
             old_element=a.element if a else None,
             new_element=b.element if b else None,
-            old_range=a.span if a else None,
-            new_range=b.span if b else None,
+            old_range=a.span if a and not addition else None,
+            new_range=b.span if b and not deletion else None,
             status="confirmed" if confirmed else "needs_review",
             source="ai",
-            reason=observation.reason,
+            reason=". ".join(
+                dict.fromkeys(filter(None, (observation.reason, observation.mapping_reason)))
+            ),
             ai_mode=unit.mode,
-            verified_by="ai_and_independent_text" if confirmed else "",
+            verified_by=("ai_visual" if visual else "ai_and_independent_text") if confirmed else "",
             confidence=observation.confidence,
+            unverified_reason=""
+            if confirmed
+            else "partial_coverage"
+            if not reply.complete
+            else "unreadable_image"
+            if not reply.readable
+            else "mapping_not_found",
+            old_ocr=unit.old_text if a and a.span is None else "",
+            new_ocr=unit.new_text if b and b.span is None else "",
+            old_anchor_regions=a.areas if addition and a else [],
+            new_anchor_regions=b.areas if deletion and b else [],
             uncertainty_id=unit.targets[0]
             if observation.category == "unverified_region" and len(unit.targets) == 1
             else "",
         )
+        if (
+            confirmed
+            and candidate.category in {"number_modified", "text_modified", "table_modified"}
+            and any(
+                d.active
+                and d.source == "deterministic"
+                and d.status == "confirmed"
+                and normalize(d.old_text).text == normalize(candidate.old_text).text
+                and normalize(d.new_text).text != normalize(candidate.new_text).text
+                and any(_overlap(x, y) for x in d.old_regions for y in candidate.old_regions)
+                and any(_overlap(x, y) for x in d.new_regions for y in candidate.new_regions)
+                for d in result.differences
+            )
+        ):
+            confirmed = False
+            candidate.status, candidate.verified_by, candidate.unverified_reason = (
+                "needs_review",
+                "",
+                "conflicting_evidence",
+            )
+            candidate.title = "ИИ: противоречивое значение требует проверки"
         for side, located in (("old", a), ("new", b)):
-            if located and located.element:
-                element = next(e for e in getattr(result, side).elements if e.id == located.element)
+            element = next(
+                (e for e in getattr(result, side).elements if located and e.id == located.element),
+                None,
+            )
+            if element:
                 setattr(candidate, side + "_section", element.section)
         duplicates = [d for d in result.differences if _duplicate(d, candidate)]
         if duplicates:
             for difference in duplicates:
-                if confirmed and (
-                    is_unverified(difference)
-                    or difference.source == "ai"
-                    and difference.status == "needs_review"
+                if (
+                    confirmed
+                    and difference.status == "confirmed"
+                    and difference.source == "deterministic"
                 ):
-                    difference.status = "confirmed"
-                    difference.verified_by = "ai_and_independent_text"
-                    difference.ai_mode = unit.mode
-                    difference.old_regions, difference.new_regions = a.areas, b.areas
-                    difference.old_range, difference.new_range = a.span, b.span
-                    resolved.add(difference.uncertainty_id or difference.id)
-                    root = difference.uncertainty_id or difference.id
-                    if root in result.ai_review.original_uncertainties:
-                        result.ai_review.resolutions[root] = "different"
-            continue
-        if not any(d.id == identifier for d in result.differences):
+                    difference.verified_by = "algorithms_and_ai"
+                elif confirmed:
+                    if is_unverified(difference):
+                        result.ai_review.resolutions[difference.uncertainty_id or difference.id] = (
+                            "different"
+                        )
+                    difference.old_ocr, difference.new_ocr = (
+                        difference.old_text,
+                        difference.new_text,
+                    )
+                    difference.status, difference.source = "confirmed", "ai"
+                    difference.verified_by, difference.ai_mode = candidate.verified_by, unit.mode
+                    difference.old_regions, difference.new_regions = ar, br
+                    difference.old_range, difference.new_range = (
+                        candidate.old_range,
+                        candidate.new_range,
+                    )
+                    difference.unverified_reason = ""
+        elif not any(d.id == candidate.id for d in result.differences):
             result.differences.append(candidate)
         if confirmed:
-            for difference in result.differences:
-                root = difference.uncertainty_id or difference.id
-                if (
-                    root in unit.targets
-                    and difference.category == "unverified_region"
-                    and is_unverified(difference)
-                    and (
-                        not difference.old_text
-                        or normalize(difference.old_text).text
-                        == normalize(observation.old_value).text
-                    )
-                    and (
-                        not difference.new_text
-                        or normalize(difference.new_text).text
-                        == normalize(observation.new_value).text
-                    )
-                ):
-                    difference.active = False
-                    resolved.add(root)
-                    result.ai_review.resolutions[root] = "different"
+            unit.verified_by = candidate.verified_by
+            _save_mapping(result, unit, observation, a, b)
             for side, located in (("old", a), ("new", b)):
                 if located.element:
                     getattr(result.coverage, side)[located.element] = "changed"
+            _resolve(result, unit, observation, a, b, False, visual)
+            for conflict in result.differences:
+                if (
+                    conflict.category == "ai_contradiction"
+                    and conflict.active
+                    and any(
+                        _duplicate(d, candidate) and conflict.id == "AI-C-" + d.id
+                        for d in duplicates
+                    )
+                ):
+                    conflict.active = False
     remaining = uncertainty_ids(result.differences)
     result.coverage.resolved_ai = len(set(result.ai_review.original_uncertainties) - remaining)
     result.coverage.new_unverified = len(remaining - set(result.ai_review.original_uncertainties))
+    result.coverage.geometry_missing = sum(
+        int(bool(d.old_element and not d.old_regions and not d.category.endswith("_added")))
+        + int(bool(d.new_element and not d.new_regions and not d.category.endswith("_deleted")))
+        for d in result.differences
+        if d.active
+    )
+    if not result.coverage.geometry_missing:
+        result.warnings = [
+            warning
+            for warning in result.warnings
+            if warning != "Не все изменения имеют надёжную геометрическую привязку"
+        ]
     result.ai_review.resolutions = {
         key: value for key, value in result.ai_review.resolutions.items() if key not in remaining
     }
+
+
+def _save_mapping(result, unit, observation, a, b, same=False):
+    """Сохраняет соответствие из изображений, в том числе без алгоритмического якоря."""
+    method = (
+        ("ai_visual_same" if same else "ai_visual")
+        if observation.mapping_confirmed and unit.visual_refs
+        else "ai_and_independent_text"
+    )
+    if not any(
+        m.source == "ai" and m.old_regions == a.areas and m.new_regions == b.areas
+        for m in result.matches
+    ):
+        result.matches.append(
+            ElementMatch(
+                [a.element] if a.element else [],
+                [b.element] if b.element else [],
+                method,
+                observation.confidence,
+                observation.category == "text_moved",
+                a.areas,
+                b.areas,
+                "ai",
+                observation.mapping_reason or "Сопоставлено ИИ с исходными областями",
+            )
+        )
 
 
 def _record_contradiction(result, unit):
@@ -360,7 +607,7 @@ def _resolve_refined_same(result, unit, reply):
         return
     a = next(e for e in result.old.elements if e.id == unit.old_elements[0])
     b = next(e for e in result.new.elements if e.id == unit.new_elements[0])
-    if not _corresponds(result, a.id, b.id):
+    if not _compatible(result, a.id, b.id):
         return
     if unit.old_text != a.text or unit.new_text != b.text:
         return
@@ -395,12 +642,30 @@ def _resolve_refined_same(result, unit, reply):
         root = difference.uncertainty_id or difference.id
         if (
             root in unit.targets
+            and difference.unverified_reason != "unsupported_property"
             and is_unverified(difference)
             and difference.old_element == a.id
             and difference.new_element == b.id
         ):
             difference.active = False
+            difference.verified_by = "ai_and_independent_text"
             result.ai_review.resolutions[root] = "same_independent_ocr"
+            unit.verified_by = "ai_and_independent_text"
+    if unit.verified_by and not any(
+        m.source == "ai" and a.id in m.old and b.id in m.new for m in result.matches
+    ):
+        result.matches.append(
+            ElementMatch(
+                [a.id],
+                [b.id],
+                "ai_and_independent_text",
+                1,
+                old_regions=unit.old_regions,
+                new_regions=unit.new_regions,
+                source="ai",
+                reason="Совпали полные независимые OCR-кропы и визуальный вывод ИИ",
+            )
+        )
     result.coverage.old[a.id] = "unchanged"
     result.coverage.new[b.id] = "unchanged"
 

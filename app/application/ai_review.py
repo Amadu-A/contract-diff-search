@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 
 from app.application.ai_evidence import merge_reply
-from app.application.ai_planning import full_plan, unverified_plan
+from app.application.ai_planning import full_plan, unit_id, unverified_plan
 from app.application.ports import GeometryRefiner, ModelReviewer
 from app.domain.models import AIModes, AIObservation, Cancelled, VerificationError
 from app.domain.text import normalize
@@ -244,7 +244,8 @@ class AIReviewCoordinator:
             persist(result)
             pending = [u for u in units if u.status != "completed"]
             with _pool(self.limits.concurrency) as pool:
-                for offset in range(0, len(pending), self.limits.batch_size):
+                offset = 0
+                while offset < len(pending):
                     batch = offset // self.limits.batch_size + 1
                     checkpoint(
                         f"ИИ: {'все документы' if mode == 'full' else 'непроверенные области'}, пакет {batch}"
@@ -265,10 +266,10 @@ class AIReviewCoordinator:
                         reply, error, duration = future.result()
                         unit.duration_ms = round(duration, 2)
                         if reply is not None:
-                            unit.observations = [*reply.findings, *reply.evidence]
                             unit.readable = reply.readable
                             self._same_evidence(result, unit, reply)
                             merge_reply(result, unit, reply)
+                            unit.observations = [*reply.findings, *reply.evidence]
                             unit.outcome = reply.outcome
                             unit.status = (
                                 "completed" if reply.complete and reply.readable else "failed"
@@ -283,6 +284,20 @@ class AIReviewCoordinator:
                         else:
                             unit.status = "skipped" if error.kind == "time_budget" else "failed"
                             unit.error_kind = error.kind
+                        if unit.status != "completed":
+                            for difference in result.differences:
+                                if (
+                                    difference.active
+                                    and (difference.uncertainty_id or difference.id) in unit.targets
+                                    and difference.unverified_reason != "unsupported_property"
+                                ):
+                                    difference.unverified_reason = (
+                                        "unreadable_image"
+                                        if unit.error_kind == "unreadable"
+                                        else "partial_coverage"
+                                        if unit.error_kind == "context_incomplete"
+                                        else "model_error"
+                                    )
                         self._progress(result, mode, units)
                         state.elapsed_ms = round((time.monotonic() - started) * 1000, 2)
                         persist(result)
@@ -305,6 +320,22 @@ class AIReviewCoordinator:
                         checkpoint(
                             f"ИИ: {mode}, обработано {progress.processed}/{progress.planned}"
                         )
+                    offset += len(group)
+                    if time.monotonic() < deadline and any(
+                        d.active and d.category == "ai_contradiction" for d in result.differences
+                    ):
+                        known = {u.id for u in units}
+                        for followup in unverified_plan(
+                            result, self.limits.context_chars, self.limits.region_limit
+                        ):
+                            if followup.kind != "conflict":
+                                continue
+                            followup.mode = mode
+                            followup.id = unit_id(followup)
+                            if followup.id not in known:
+                                units.append(followup)
+                                pending.append(followup)
+                                known.add(followup.id)
             self._progress(result, mode, units, final=True)
             persist(result)
         requested = [

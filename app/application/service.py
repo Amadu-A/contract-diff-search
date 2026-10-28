@@ -6,10 +6,11 @@
 """
 
 import hashlib
+import json
 import logging
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import BinaryIO
 from uuid import uuid4
@@ -24,6 +25,7 @@ from app.application.ports import (
     Verifier,
     VisualComparator,
 )
+from app.application.queries import integration_status
 from app.domain.comparison import compare
 from app.domain.models import (
     TERMINAL,
@@ -88,6 +90,9 @@ class ComparisonService:
         *,
         ai_full: bool | None = None,
         ai_unverified: bool = False,
+        integration_client: str = "",
+        idempotency_key: str = "",
+        max_active_jobs: int | None = None,
     ) -> ComparisonJob:
         """Резервирует квоту, сохраняет документы и публикует долговечную задачу."""
         now, job_id = time.time(), str(uuid4())
@@ -105,27 +110,79 @@ class ComparisonService:
             Path(new_name.replace("\\", "/")).name[:240],
             ai_full=full,
             ai_unverified=ai_unverified,
+            integration_client=integration_client,
         )
-        self.repository.create(job, self.limits.max_jobs, self.limits.max_session_jobs)
+        if integration_client:
+            job.owner = owner_hash("integration:" + integration_client)
+            job.idempotency_key = owner_hash(idempotency_key)
+            digests = []
+            for stream in (old_stream, new_stream):
+                try:
+                    digests.append(hashlib.file_digest(stream, "sha256").hexdigest())
+                finally:
+                    stream.seek(0)
+            job.request_fingerprint = owner_hash(
+                json.dumps([job.old_name, job.new_name, *digests, full, ai_unverified])
+            )
+        existing = self.repository.create(
+            job, self.limits.max_jobs, max_active_jobs or self.limits.max_session_jobs
+        )
+        if existing:
+            if existing.status == JobStatus.EXPIRED or existing.expires <= now:
+                raise DocumentError("Срок хранения истёк", status_code=410, code="result_expired")
+            return existing
         try:
             self.storage.save_upload(job_id, "old", job.old_name, old_stream)
             self.storage.save_upload(job_id, "new", job.new_name, new_stream)
             self.publisher.publish(job_id)
             return job
-        except Exception:
+        except Exception as exc:
             self.storage.delete(job_id)
             self.repository.update(
                 job_id, status=JobStatus.EXPIRED, expires=time.time(), stage="Не принято"
             )
+            if integration_client and not isinstance(exc, DocumentError):
+                raise DocumentError(
+                    "Очередь обработки временно недоступна",
+                    status_code=503,
+                    code="queue_unavailable",
+                ) from exc
             raise
 
-    def owned_job(self, job_id: str, capability: str) -> ComparisonJob:
+    def owned_job(
+        self,
+        job_id: str,
+        capability: str,
+        *,
+        viewer: str = "",
+        integration_client: str = "",
+        allow_expired: bool = False,
+    ) -> ComparisonJob:
         """Проверяет capability и срок действия; один UUID права доступа не даёт."""
         job = self.repository.get(job_id)
-        if job is None or not secrets.compare_digest(job.owner, owner_hash(capability)):
+        if job is None:
+            raise AccessDenied()
+        owner = bool(
+            not job.integration_client and secrets.compare_digest(job.owner, owner_hash(capability))
+        )
+        integration = bool(
+            integration_client
+            and secrets.compare_digest(job.integration_client.encode(), integration_client.encode())
+        )
+        if (
+            not owner
+            and not integration
+            and not (viewer and self.repository.can_view(job_id, owner_hash(viewer), time.time()))
+        ):
             raise AccessDenied()
         if job.status == JobStatus.EXPIRED or job.expires <= time.time():
-            raise DocumentError("Срок хранения истёк; загрузите документы повторно")
+            if not allow_expired:
+                raise DocumentError(
+                    "Срок хранения истёк; загрузите документы повторно",
+                    status_code=410,
+                    code="result_expired",
+                )
+            job.status = JobStatus.EXPIRED
         if job.status in TERMINAL:
             for mode in ("full", "unverified"):
                 report = job.ai_progress.get(mode, {})
@@ -139,9 +196,9 @@ class ComparisonService:
                     )
         return job
 
-    def result(self, job_id: str, capability: str) -> dict:
+    def result(self, job_id: str, capability: str, *, viewer: str = "") -> dict:
         """Выдаёт результат только завершённого задания его владельцу."""
-        job = self.owned_job(job_id, capability)
+        job = self.owned_job(job_id, capability, viewer=viewer)
         if job.status not in {JobStatus.COMPLETED, JobStatus.WARNINGS} and not (
             job.status
             in {JobStatus.PROCESSING, JobStatus.CANCELLED, JobStatus.FAILED, JobStatus.QUEUED}
@@ -161,6 +218,46 @@ class ComparisonService:
             for mode in ("full", "unverified"):
                 data.get("ai_review", {}).get(mode, {}).update(job.ai_progress.get(mode, {}))
         return data
+
+    def access_link(self, job_id: str, client: str, public_url: str, lifetime: int) -> dict:
+        """Выдаёт переносимое одноразовое право чтения без раскрытия владельца задания."""
+        job = self.owned_job(job_id, "", integration_client=client)
+        if not public_url:
+            raise DocumentError(
+                "Публичный адрес сервиса не настроен",
+                status_code=503,
+                code="public_url_unconfigured",
+            )
+        if not self.storage.has_result(job_id):
+            raise DocumentError("Результат ещё не готов", status_code=409, code="not_ready")
+        token, now = secrets.token_urlsafe(48), time.time()
+        expires = self.repository.create_access(
+            job_id, client, owner_hash(token), now + lifetime, now
+        )
+        return {
+            "job_id": job_id,
+            "url": f"{public_url}/open#ticket={token}",
+            "link_expires_at": expires,
+            "result_expires_at": job.expires,
+        }
+
+    def integration_status(self, job_id: str, client: str) -> dict:
+        """Отдаёт боту актуальные счётчики checkpoint, сохраняя отдельный признак готовности."""
+        job = self.owned_job(job_id, "", integration_client=client, allow_expired=True)
+        data = (
+            self.storage.read_result(job_id)
+            if job.status != JobStatus.EXPIRED and self.storage.has_result(job_id)
+            else None
+        )
+        return integration_status(job, data)
+
+    def activate_link(self, token: str) -> tuple[str, str, float]:
+        """Расходует билет через POST; созданная сессия не меняет исходного владельца."""
+        session = secrets.token_urlsafe(48)
+        job_id, expires = self.repository.activate_access(
+            owner_hash(token), owner_hash(session), time.time()
+        )
+        return job_id, session, expires
 
     def retry_ai(self, job_id: str, capability: str) -> ComparisonJob:
         """Повторяет неудачные единицы по сохранённому плану без повторного OCR и сравнения."""
@@ -214,6 +311,7 @@ class ComparisonService:
         started, last_stage, last_write = time.monotonic(), "", 0.0
         result = None
         enforce_timeout = True
+        export_revision = ""
 
         def checkpoint(stage: str) -> None:
             """Проверяет отмену и аренду между дорогими операциями и сохраняет текущую стадию."""
@@ -229,7 +327,21 @@ class ComparisonService:
 
         def persist(current) -> None:
             """Проверяет аренду до каждого атомарного checkpoint и сохраняет только безопасные счётчики в SQLite."""
+            nonlocal export_revision
             checkpoint(last_stage or "ИИ-проверка")
+            revision = hashlib.sha256(
+                json.dumps(
+                    [asdict(d) for d in current.differences if d.active], ensure_ascii=False
+                ).encode()
+            ).hexdigest()
+            if current.ai_status == "running" and revision != export_revision:
+                current.exports_current = False
+                self.storage.write_result(job_id, current)
+                current.exports = self.exporter.export(
+                    current, directory, checkpoint, include_word=False
+                )
+                current.exports_current = True
+                export_revision = revision
             self.storage.write_result(job_id, current)
             self.repository.update(job_id, ai_progress=public_progress(current.ai_review))
 

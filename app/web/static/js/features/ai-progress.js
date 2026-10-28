@@ -7,8 +7,9 @@ const errors = {timeout:'Таймаут запроса',network:'Ошибка с
 
 export class AIProgress {
   /** Подключает только реальные технические сведения и повтор незавершённых операций. */
-  constructor(onError, onRetry) {
+  constructor(onError, onRetry, readOnly = false) {
     this.onError = onError;
+    this.readOnly = readOnly;
     this.sequence = 0;
     this.root = document.querySelector('[data-ai-progress]');
     this.operations = document.querySelector('[data-ai-operations]');
@@ -30,7 +31,7 @@ export class AIProgress {
     const source = metrics.original_unverified ?? reports.original_unverified;
     const resolved = metrics.resolved_ai ?? reports.resolved_ai;
     document.querySelector('[data-ai-resolution]').textContent = source !== undefined ? `Исходных непроверенных областей: ${source}; разрешено ИИ: ${resolved || 0}${metrics.new_unverified ? `; новых: ${metrics.new_unverified}` : ''}${metrics.remaining_unverified !== undefined ? `; осталось: ${metrics.remaining_unverified}` : ''}.` : '';
-    document.querySelector('[data-ai-retry]').hidden = !['completed','completed_with_warnings','cancelled','failed'].includes(job.status) || (job.status !== 'cancelled' && !Object.values(reports).some(value => value && ['failed','partial'].includes(value.status)));
+    document.querySelector('[data-ai-retry]').hidden = this.readOnly || !['completed','completed_with_warnings','cancelled','failed'].includes(job.status) || (job.status !== 'cancelled' && !Object.values(reports).some(value => value && ['failed','partial'].includes(value.status)));
   }
 
   /** Показывает состояния отдельных единиц и безопасные категории ошибок. */
@@ -48,7 +49,8 @@ export class AIProgress {
     if (this.sequence !== sequence || this.job?.id !== id || this.operations.hidden) return;
     for (const item of data.items) {
       const line = document.createElement('p');
-      line.textContent = `${item.mode} · ${item.kind} · ${item.id} · ${item.status}${item.error_kind ? ` · ${errors[item.error_kind] || 'Ошибка проверки'}` : ''} · попыток: ${item.attempts} · ${Math.round(item.duration_ms)} мс`;
+      const accepted = item.verified_by ? (item.outcome === 'same' ? 'Совпадает — проверено ИИ' : 'Различие подтверждено ИИ') : item.status;
+      line.textContent = `${item.mode} · ${item.kind} · ${item.id} · ${accepted}${item.error_kind ? ` · ${errors[item.error_kind] || 'Ошибка проверки'}` : ''} · попыток: ${item.attempts} · ${Math.round(item.duration_ms)} мс`;
       this.operations.append(line);
     }
     const next = offset + data.items.length;

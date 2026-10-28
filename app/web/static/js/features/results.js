@@ -39,6 +39,8 @@ export class Results {
       const node = document.querySelector(`[data-stat="${key}"]`);
       if (node) node.textContent = value;
     }
+    const counts = summary.statistics;
+    document.querySelector('[data-confirmed-breakdown]').textContent = `Алгоритмы: ${counts.algorithms_confirmed || 0}; ИИ: ${counts.ai_confirmed || 0}; совместно: ${counts.both_confirmed || 0}`;
     const warning = summary.statistics.unverified > 0 || summary.warnings.length > 0;
     document.querySelector('[data-warning]').hidden = !warning;
     document.querySelector('[data-warning-text]').textContent = summary.warnings.join('. ') || 'Некоторые участки не удалось проверить автоматически. Просмотрите их вручную.';
@@ -118,7 +120,8 @@ export class Results {
     document.querySelector('[data-detail-position]').textContent = `${index + 1}/${this.items.length}`;
     document.querySelector('[data-detail-meta]').textContent = `Наша: ${item.old_regions[0]?.page || 'нет привязки'} · Контрагент: ${item.new_regions[0]?.page || 'нет привязки'}`;
     document.querySelector('[data-detail-category]').textContent = categoryLabel(item.category);
-    document.querySelector('[data-detail-reason]').textContent = item.source === 'ai' ? `${item.status === 'confirmed' ? 'Подтверждено независимой проверкой' : 'Обнаружено ИИ, требует проверки'}. ${item.reason}` : item.reason;
+    const causes = {unreadable_image:'Изображение не удалось прочитать',mapping_not_found:'Соответствие фрагментов не установлено',partial_coverage:'Проверена только часть области',unsupported_property:'Свойство невозможно проверить по изображению',model_error:'Ошибка запроса к модели',conflicting_evidence:'Противоречивые результаты проверки',missing_geometry:'Нет надёжной геометрической привязки'};
+    document.querySelector('[data-detail-reason]').textContent = (item.source === 'ai' ? `${item.status === 'confirmed' ? 'Подтверждено ИИ по исходным документам' : 'Обнаружено ИИ, требует проверки'}. ` : '') + item.reason + (item.unverified_reason ? `. ${causes[item.unverified_reason] || item.unverified_reason}` : '');
     document.querySelector('[data-detail-old]').textContent = item.old_text || 'Фрагмент отсутствует';
     document.querySelector('[data-detail-new]').textContent = item.new_text || 'Фрагмент отсутствует';
     for (const side of ['old','new']) {
@@ -127,7 +130,7 @@ export class Results {
       if (!image.hidden) image.src = jobUrl(this.job, `/crop/${side}/${encodeURIComponent(item.id)}`);
       else image.removeAttribute('src');
     }
-    document.querySelector('[data-detail-source]').textContent = item.source === 'ai' ? `Источник: ИИ (${item.ai_mode === 'full' ? 'полный проход' : 'непроверенные области'})` : item.verified_by ? 'Источник: алгоритмы; перепроверено ИИ' : 'Источник: детерминированное сравнение';
+    document.querySelector('[data-detail-source]').textContent = item.source === 'ai' ? `Источник: ИИ — ${item.verified_by === 'ai_visual' ? 'визуальная проверка исходных документов' : item.status === 'confirmed' ? 'проверка с независимым извлечением' : 'неподтверждённое замечание'}` : item.verified_by ? 'Источник: алгоритмы; перепроверено ИИ' : 'Источник: детерминированное сравнение';
     document.querySelector('[data-diff-prev]').disabled = index === 0;
     document.querySelector('[data-diff-next]').disabled = index === this.items.length - 1;
     for (const button of document.querySelectorAll('[data-index]')) button.setAttribute('aria-current', String(Number(button.dataset.index) === index));
@@ -157,6 +160,7 @@ export class Results {
     document.querySelector('[data-load-more]').hidden = true;
     document.querySelector('[data-warning]').hidden = true;
     for (const node of document.querySelectorAll('[data-stat]')) node.textContent = '—';
+    document.querySelector('[data-confirmed-breakdown]').textContent = 'уникальные подтверждённые изменения';
     this.clearDetails('Различия появятся после анализа документов');
   }
 }

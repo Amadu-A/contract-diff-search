@@ -2,10 +2,37 @@
 """Чистые прикладные проекции результата для интерфейса, фильтров и навигации."""
 
 from collections import Counter
+from datetime import UTC, datetime
 
 from app.domain.comparison import statistics
-from app.domain.models import Difference
+from app.domain.models import TERMINAL, Difference, JobStatus
 from app.domain.visibility import visible
+
+
+def integration_status(job, data: dict | None) -> dict:
+    """Проецирует текущие счётчики для внешнего клиента без содержимого документов и предварительного TTL."""
+    ready = job.status in {JobStatus.COMPLETED, JobStatus.WARNINGS} and data is not None
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "stage": "completed" if ready else job.stage,
+        "ai_full": bool(job.ai_full),
+        "ai_unverified": bool(job.ai_unverified),
+        "result_ready": ready,
+        "ai": {
+            mode: job.ai_progress.get(
+                mode, {"status": "queued" if getattr(job, "ai_" + mode) else "not_requested"}
+            )
+            for mode in ("full", "unverified")
+        },
+        "statistics": statistics([Difference(**d) for d in data["differences"]]) if data else None,
+        "expires_at": datetime.fromtimestamp(job.expires, UTC) if job.status in TERMINAL else None,
+        "error_code": "processing_failed"
+        if job.status == JobStatus.FAILED
+        else "result_expired"
+        if job.status == JobStatus.EXPIRED
+        else None,
+    }
 
 
 def summary(data: dict) -> dict:
@@ -124,6 +151,7 @@ def ai_operations(data: dict, offset: int, limit: int) -> dict:
                     "attempts",
                     "error_kind",
                     "duration_ms",
+                    "verified_by",
                 )
             }
             for unit in units[offset : offset + limit]
@@ -138,6 +166,10 @@ def correspondence(data: dict, side: str, page: int) -> dict:
     partner = {e["id"]: e for e in data[other]["elements"]}
     votes = Counter()
     for match in data["matches"]:
+        if match.get("source") == "ai":
+            if any(r["page"] == page for r in match.get(side + "_regions", [])):
+                votes.update(r["page"] for r in match.get(other + "_regions", []))
+            continue
         if not any(
             w["region"]["page"] == page
             for identifier in match[side]

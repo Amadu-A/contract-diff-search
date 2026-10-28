@@ -140,6 +140,10 @@ class ElementMatch:
     method: str
     confidence: float
     moved: bool = False
+    old_regions: list[VisualRegion] = field(default_factory=list)
+    new_regions: list[VisualRegion] = field(default_factory=list)
+    source: str = "deterministic"
+    reason: str = ""
 
 
 @dataclass
@@ -168,6 +172,11 @@ class Difference:
     ai_mode: str = ""
     verified_by: str = ""
     confidence: float = 0.0
+    unverified_reason: str = ""
+    old_ocr: str = ""
+    new_ocr: str = ""
+    old_anchor_regions: list[VisualRegion] = field(default_factory=list)
+    new_anchor_regions: list[VisualRegion] = field(default_factory=list)
 
 
 @dataclass
@@ -215,6 +224,10 @@ class AIObservation:
     confidence: float = 0.0
     old_quote: str = ""
     new_quote: str = ""
+    mapping_confirmed: bool = False
+    mapping_reason: str = ""
+    covers_region: bool = False
+    absence_confirmed: bool = False
 
 
 @dataclass
@@ -228,6 +241,7 @@ class AIReply:
     complete: bool = True
     old_evidence: list[Word] = field(default_factory=list)
     new_evidence: list[Word] = field(default_factory=list)
+    visual_refs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -249,7 +263,7 @@ class ReviewUnit:
     attempts: int = 0
     error_kind: str = ""
     duration_ms: float = 0
-    prompt_version: str = "1"
+    prompt_version: str = "2"
     segment: int = 0
     job_id: str = ""
     disabled_features: list[str] = field(default_factory=list)
@@ -257,6 +271,8 @@ class ReviewUnit:
     readable: bool | None = None
     old_evidence: list[Word] = field(default_factory=list)
     new_evidence: list[Word] = field(default_factory=list)
+    visual_refs: list[str] = field(default_factory=list)
+    verified_by: str = ""
 
 
 @dataclass
@@ -285,6 +301,7 @@ class AIReviewState:
     original_uncertainties: list[str] = field(default_factory=list)
     resolutions: dict[str, str] = field(default_factory=dict)
     elapsed_ms: float = 0
+    covered_regions: dict[str, dict[str, list[VisualRegion]]] = field(default_factory=dict)
 
 
 @dataclass
@@ -333,6 +350,9 @@ class ComparisonJob:
     ai_unverified: bool = False
     ai_progress: dict = field(default_factory=dict)
     resume_ai: bool = False
+    integration_client: str = ""
+    idempotency_key: str = ""
+    request_fingerprint: str = ""
 
 
 class VerificationError(Exception):
@@ -346,6 +366,11 @@ class VerificationError(Exception):
 
 class DocumentError(Exception):
     """Ожидаемая ошибка документа, которую безопасно показать пользователю."""
+
+    def __init__(self, message: str, *, status_code: int = 422, code: str = "invalid_document"):
+        """Сохраняет безопасный публичный код без привязки прикладного слоя к HTTP-фреймворку."""
+        super().__init__(message)
+        self.status_code, self.code = status_code, code
 
 
 class AccessDenied(Exception):

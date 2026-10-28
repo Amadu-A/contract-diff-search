@@ -2,9 +2,9 @@
 """Единственная точка чтения конфигурации: baseline, приватный .env, окружение."""
 
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,10 +18,19 @@ class Settings(BaseSettings):
         env_nested_delimiter="__",
         case_sensitive=False,
         extra="forbid",
+        hide_input_in_errors=True,
     )
     app_host: str = "0.0.0.0"
     app_bind_ip: str = "192.168.55.3"
     app_port: int = Field(8082, ge=1, le=65535)
+    public_base_url: str = ""
+    telegram_integration_token: SecretStr = SecretStr("")
+    telegram_client_id: str = Field("telegram-bot", min_length=1, max_length=80)
+    telegram_max_active_jobs: int = Field(4, ge=1, le=20)
+    telegram_requests_per_minute: int = Field(120, ge=1, le=600)
+    telegram_uploads_per_minute: int = Field(6, ge=1, le=60)
+    access_link_seconds: int = Field(900, ge=30, le=3600)
+    access_exchange_per_minute: int = Field(20, ge=1, le=120)
     data_dir: Path = ROOT / ".data"
     process_temp_dir: Path = ROOT / ".data/tmp"
     max_file_mb: int = Field(100, ge=1, le=100)
@@ -77,6 +86,34 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     max_page_pixels: int = Field(24000000, ge=1000000, le=50000000)
     max_elements: int = Field(30000, ge=100, le=100000)
+
+    @field_validator("public_base_url")
+    @classmethod
+    def validate_public_base_url(cls, value: str) -> str:
+        """Принимает явно настроенный HTTP(S)-адрес без секрета, пути и служебных частей."""
+        parsed = urlsplit(value)
+        if value:
+            _ = parsed.port
+        if value and (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or parsed.hostname in {"0.0.0.0", "::"}
+        ):
+            raise ValueError("PUBLIC_BASE_URL должен содержать публичный HTTP(S)-адрес сервиса")
+        return value.rstrip("/")
+
+    @field_validator("telegram_integration_token")
+    @classmethod
+    def validate_integration_token(cls, value: SecretStr) -> SecretStr:
+        """Запрещает слабый серверный секрет; пустое значение оставляет интеграцию выключенной."""
+        if value.get_secret_value() and len(value.get_secret_value()) < 32:
+            raise ValueError("Интеграционный секрет должен содержать не менее 32 символов")
+        return value
 
     @property
     def broker_url(self) -> str:

@@ -231,7 +231,10 @@ def compare(
                         before.id,
                         after.id,
                         status="unverified" if "pdf" in {old.format, new.format} else "confirmed",
-                        reason="Адрес назначения нельзя подтвердить по скану"
+                        reason="Невозможно проверить адрес гиперссылки по сканированному PDF"
+                        if "pdf" in {old.format, new.format}
+                        else "",
+                        unverified_reason="unsupported_property"
                         if "pdf" in {old.format, new.format}
                         else "",
                     )
@@ -374,6 +377,26 @@ def compare(
                 )
 
     differences.extend(_graphics(old, new, visual_scores or {}))
+    for side, document, other in (("old", old, new), ("new", new, old)):
+        if document.format not in {"doc", "docx"} or other.format != "pdf":
+            continue
+        for element in document.elements:
+            if not element.attributes.get("hidden_fields"):
+                continue
+            differences.append(
+                Difference(
+                    "",
+                    "unverified_region",
+                    "Скрытые поля Word — непроверяемое свойство",
+                    old_element=element.id if side == "old" else None,
+                    new_element=element.id if side == "new" else None,
+                    old_regions=regions(element) if side == "old" else [],
+                    new_regions=regions(element) if side == "new" else [],
+                    status="unverified",
+                    reason="Невозможно проверить скрытые поля Word по сканированному PDF",
+                    unverified_reason="unsupported_property",
+                )
+            )
     _group_uncertainties(differences, matches)
     for version, coverage, side in ((old, coverage_a, "old"), (new, coverage_b, "new")):
         for graphic in version.graphics:
@@ -451,6 +474,13 @@ def _group_uncertainties(differences, matches) -> None:
     for difference in differences:
         if not is_unverified(difference):
             continue
+        if not difference.unverified_reason:
+            difference.unverified_reason = (
+                "missing_geometry"
+                if (difference.old_element and not difference.old_regions)
+                or (difference.new_element and not difference.new_regions)
+                else "mapping_not_found"
+            )
         roots = sorted(
             {
                 owners.get(
@@ -468,6 +498,8 @@ def _group_uncertainties(differences, matches) -> None:
                 for r in getattr(difference, side + "_regions")
             ]
         difference.uncertainty_id = "|".join(roots) or "unknown-area"
+        if difference.unverified_reason == "unsupported_property":
+            difference.uncertainty_id += ":property:" + difference.title
         if difference.category != "unverified_region":
             continue
         previous = warnings.get(difference.uncertainty_id)
@@ -609,4 +641,6 @@ def statistics(differences: list[Difference]) -> dict[str, int]:
         "unverified": len(uncertainty_ids(active)),
         "ai_needs_review": sum(d.source == "ai" and d.status == "needs_review" for d in active),
         "ai_confirmed": sum(d.verified_by.startswith("ai") or d.source == "ai" for d in confirmed),
+        "algorithms_confirmed": sum(d.source == "deterministic" for d in confirmed),
+        "both_confirmed": sum(d.verified_by == "algorithms_and_ai" for d in confirmed),
     }

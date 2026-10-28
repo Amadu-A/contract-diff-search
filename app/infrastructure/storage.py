@@ -103,7 +103,9 @@ class FileStorage:
             while chunk := stream.read(1024 * 1024):
                 size += len(chunk)
                 if size > self.settings.max_file_mb * 1024**2:
-                    raise DocumentError("Превышен допустимый размер файла")
+                    raise DocumentError(
+                        "Превышен допустимый размер файла", status_code=413, code="file_too_large"
+                    )
                 output.write(chunk)
         with path.open("rb") as source:
             magic = source.read(16)

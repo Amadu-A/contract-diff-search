@@ -8,6 +8,9 @@ import { Results } from './features/results.js';
 import { AIProgress } from './features/ai-progress.js';
 
 const form = document.querySelector('[data-comparison-form]');
+const readOnly = window.location.pathname === '/open';
+let accessTicket = readOnly ? new URLSearchParams(window.location.hash.slice(1)).get('ticket') : null;
+if (readOnly && window.location.hash) history.replaceState(null, '', window.location.pathname + window.location.search);
 const start = document.querySelector('[data-start]');
 const cancel = document.querySelector('[data-cancel]');
 const progress = document.querySelector('[data-progress]');
@@ -52,7 +55,7 @@ async function synchronize(side, page) {
 
 const viewers = [...document.querySelectorAll('[data-viewer]')].map(root => new Viewer(root, synchronize, showError));
 const results = new Results(viewers, showError);
-const aiProgress = new AIProgress(showError, retryAI);
+const aiProgress = new AIProgress(showError, retryAI, readOnly);
 document.querySelector('[data-show-unverified-toggle]').addEventListener('change', event => results.setVisibility(event.target.checked).catch(showError));
 
 /** Загружает checkpoint, сохраняя выбор и прокрутку при поступлении результатов ИИ. */
@@ -68,13 +71,13 @@ async function displayResult(job, run, quiet = false) {
   }
   await results.setResult(job.id, summary, quiet);
   aiProgress.update(job, summary.ai_progress, summary.verification_metrics);
-  document.querySelector('[data-delete]').hidden = false;
+  document.querySelector('[data-delete]').hidden = readOnly;
   return summary;
 }
 
 /** Повторяет сохранённые незавершённые операции, сохраняя уже извлечённые документы. */
 async function retryAI() {
-  if (!currentJob || busy) return;
+  if (readOnly || !currentJob || busy) return;
   const run = ++generation;
   currentJob = await apiRequest(jobUrl(currentJob.id, '/ai/retry'), {method:'POST'});
   setBusy(true);
@@ -94,8 +97,8 @@ function setBusy(value) {
   busy = value;
   cards.forEach(card => card.setBusy(value));
   for (const control of document.querySelectorAll('[data-ai-full],[data-ai-unverified]')) control.disabled = value;
-  start.hidden = value;
-  cancel.hidden = !value;
+  start.hidden = readOnly || value;
+  cancel.hidden = readOnly || !value;
   updateFiles();
 }
 
@@ -125,7 +128,7 @@ async function poll(id, run) {
       progress.classList.add('progress--done');
       document.querySelector('[data-stage]').textContent = job.status === 'cancelled' ? 'Проверка отменена; сохранён частичный результат' : job.status === 'completed' ? 'Сравнение завершено' : 'Сравнение завершено с предупреждениями';
       document.querySelector('[data-ai-status]').textContent = ({not_requested:'Без ИИ-проверки',completed:'Запланированные ИИ-операции выполнены',partial:'ИИ-проверка частичная; основной результат сохранён',running:'ИИ-проверка продолжается',failed:'ИИ-проверка завершилась ошибкой; основной результат сохранён'})[summary.ai_status] || '';
-      document.querySelector('[data-delete]').hidden = false;
+      document.querySelector('[data-delete]').hidden = readOnly;
       event('Результат и доступные экспорты готовы');
     } else {
       document.querySelector('[data-stage]').textContent = job.error || (job.status === 'cancelled' ? 'Сравнение отменено' : 'Задание недоступно');
@@ -143,7 +146,7 @@ async function poll(id, run) {
 /** Отправляет выбранные файлы и запускает polling; никаких фиктивных процентов нет. */
 form.addEventListener('submit', async submitEvent => {
   submitEvent.preventDefault();
-  if (busy || cards.some(card => !card.file)) return;
+  if (readOnly || busy || cards.some(card => !card.file)) return;
   const run = ++generation;
   clearTimeout(pollTimer);
   results.clear();
@@ -180,6 +183,7 @@ form.addEventListener('submit', async submitEvent => {
 
 /** Сбрасывает данные и прекращает доступ к предыдущему результату на сервере. */
 async function reset() {
+  if (readOnly) return;
   ++generation;
   clearTimeout(pollTimer);
   const previous = currentJob;
@@ -234,6 +238,32 @@ setInterval(() => {
     displayedJob = null;
     setBusy(false);
     currentJob = null;
-    document.querySelector('[data-retention]').textContent = 'Срок хранения истёк. Загрузите документы повторно.';
+    document.querySelector('[data-retention]').textContent = readOnly ? 'Срок хранения истёк. Результат недоступен.' : 'Срок хранения истёк. Загрузите документы повторно.';
   }
 }, 1000);
+
+/** Открывает готовое задание по одноразовому билету; OCR и обработка не запускаются. */
+async function openResult() {
+  form.querySelector('.comparison-form__uploads').hidden = true;
+  form.querySelector('.ai-modes').hidden = true;
+  document.querySelector('[data-reset]').hidden = true;
+  document.querySelector('[data-read-only-note]').hidden = false;
+  setBusy(false);
+  progress.hidden = false;
+  try {
+    let id = new URLSearchParams(window.location.search).get('job');
+    if (accessTicket) {
+      const access = await apiRequest('/api/v1/result-access', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticket:accessTicket})});
+      id = access.job_id;
+      history.replaceState(null, '', `/open?job=${encodeURIComponent(id)}`);
+    }
+    if (!id || !/^[0-9a-f-]{36}$/.test(id)) throw new Error('Ссылка недействительна или уже использована');
+    await poll(id, ++generation);
+  } catch (error) {
+    showError(error);
+    document.querySelector('[data-stage]').textContent = 'Результат по ссылке недоступен';
+  } finally {
+    accessTicket = null;
+  }
+}
+if (readOnly) openResult();

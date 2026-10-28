@@ -18,6 +18,7 @@
     <button class="button" type="button" data-cancel hidden>Отменить</button>
   </div>
 </form>
+<p class="details__meta" data-read-only-note hidden>Просмотр готового результата. Изменение, повтор ИИ и удаление недоступны.</p>
 <div class="progress" role="status" aria-live="polite" data-progress hidden><span class="progress__spinner"></span><strong data-stage>В очереди</strong><span data-ai-status></span></div>
 <section class="ai-progress" data-ai-progress hidden aria-label="Статус ИИ-проверки">
   <header><h2>Статус ИИ-проверки</h2><button class="button" type="button" data-ai-details>Подробнее</button><button class="button" type="button" data-ai-retry hidden>Повторить незавершённые проверки ИИ</button></header>
@@ -26,7 +27,7 @@
 </section>
 <section class="statistics" aria-label="Статистика сравнения">
   {% for key,title,subtitle,icon in [('total','Подтверждённые различия','уникальные подтверждённые изменения','▥'),('added','Добавлено','новых фрагментов','+'),('deleted','Удалено','фрагментов удалено','−'),('ai_needs_review','Замечания ИИ','требуют дополнительной проверки','✧'),('unverified','Непроверенные области','реальное число, включая скрытые','⠿')] %}
-  <article class="stat stat--{{ key }}"><span class="stat__icon">{{ icon }}</span><div><h2>{{ title }}</h2><strong data-stat="{{ key }}">—</strong><p>{{ subtitle }}</p></div></article>
+  <article class="stat stat--{{ key }}"><span class="stat__icon">{{ icon }}</span><div><h2>{{ title }}</h2><strong data-stat="{{ key }}">—</strong><p {% if key == 'total' %}data-confirmed-breakdown{% endif %}>{{ subtitle }}</p></div></article>
   {% endfor %}
 </section>
 <aside class="warning" data-warning hidden><span class="warning__icon">⚠</span><strong>Есть непроверенные области</strong><p data-warning-text>Некоторые участки не удалось проверить автоматически. Просмотрите их вручную.</p><button class="button" type="button" data-show-unverified>◉ Показать области</button><button class="button button--icon" type="button" data-dismiss-warning aria-label="Закрыть предупреждение">×</button></aside>
