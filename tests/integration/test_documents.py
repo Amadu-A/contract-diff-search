@@ -170,7 +170,22 @@ def test_all_nine_format_combinations(settings, extractor, tmp_path, old_format,
     b = extractor.extract(
         files["new"], "partner." + new_format, tmp_path / "new", False, checkpoint
     )
-    assert any(d.old_text == "70%" and d.new_text == "50%" for d in compare(a, b).differences)
+    result = compare(a, b)
+    assert any(d.old_text == "70%" and d.new_text == "50%" for d in result.differences)
+    artifacts = DocumentExporter(office).export(result, tmp_path, checkpoint)
+    for side, kind in (("old", old_format), ("new", new_format)):
+        pdfs = [entry for entry in artifacts[side] if entry.format == "pdf"]
+        assert len(pdfs) == 2 and all(entry.path for entry in pdfs)
+        assert {entry.show_unverified for entry in pdfs} == {True, False}
+        words = [entry for entry in artifacts[side] if entry.format != "pdf"]
+        if kind == "pdf":
+            assert not words
+        else:
+            assert len(words) == 1 and words[0].format == "docx" and words[0].path
+            assert words[0].marked_changes == 1 and words[0].unmarked_changes == 0
+            assert [e.text for e in read_docx(Path(words[0].path))] == [
+                e.text for e in read_docx(tmp_path / side / "accepted.docx")
+            ]
 
 
 def test_phash_ssim_detect_small_local_edit():

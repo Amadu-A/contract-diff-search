@@ -32,6 +32,89 @@ from tests.unit.test_ai_review import Reviewer
 pytestmark = pytest.mark.browser
 
 
+@pytest.mark.parametrize(
+    "partner_format,pdf_failure", [("pdf", False), ("docx", False), ("pdf", True)]
+)
+def test_word_buttons_and_partial_notice_are_independent_of_pdf(
+    live_server, browser_page, tmp_path, monkeypatch, partner_format, pdf_failure
+):
+    """Word имеет PDF+DOCX, PDF — одну кнопку; пропуск ИИ-заливки сообщается без блокировки DOCX."""
+    from playwright.sync_api import expect
+
+    from app.domain.models import Difference, DocumentError
+    from tests.factories import docx
+
+    url, service = live_server
+    if not shutil.which(service.storage.settings.soffice_command):
+        pytest.skip("Требуется LibreOffice")
+
+    class Visual:
+        """Добавляет подтверждённый визуальный объект без логического Word-якоря для проверки пропуска."""
+
+        def verify(self, result, checkpoint, *, modes, job_id, persist):
+            """Не обращается к VLM: проверяет контракт экспорта уже принятого системой факта."""
+            result.differences.append(
+                Difference(
+                    "no-ooxml",
+                    "graphic_modified",
+                    "Объект без OOXML-якоря",
+                    "Исходный визуальный объект",
+                    "Новый визуальный объект",
+                    old_element="G-unmapped",
+                    new_element="G-unmapped",
+                    source="ai",
+                    verified_by="ai_visual",
+                )
+            )
+            result.ai_status = "completed"
+            persist(result)
+
+    service.verifier = Visual()
+    if pdf_failure:
+
+        def fail(*args, **kwargs):
+            """Воспроизводит сбой только скачиваемого PDF, не исходного preview."""
+            raise DocumentError("Ошибка PDF-разметки")
+
+        monkeypatch.setattr("app.infrastructure.exports._pdf_export", fail)
+    a = docx(tmp_path / "ours.docx", ["2.2. Advance payment is 70%."])
+    b = (pdf if partner_format == "pdf" else docx)(
+        tmp_path / f"partner.{partner_format}", ["2.2. Advance payment is 50%."]
+    )
+    page = browser_page
+    page.goto(url)
+    page.locator("[data-upload=old] [data-file-input]").set_input_files(str(a))
+    page.locator("[data-upload=new] [data-file-input]").set_input_files(str(b))
+    page.locator("[data-ai-full]").check()
+    page.locator("[data-start]").click()
+    expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
+    for side, kind in (("old", "docx"), ("new", partner_format)):
+        panel = page.locator(f"[data-viewer={side}]")
+        expect(panel.locator("[data-export-pdf]")).to_have_text("Скачать PDF")
+        button = panel.locator("[data-export-word]")
+        if kind == "pdf":
+            expect(button).to_be_hidden()
+            continue
+        expect(button).to_be_enabled()
+        expect(button).to_have_text("Скачать DOCX")
+        expect(panel.locator("[data-export-word-status]")).to_contain_text(
+            "Не размечено изменений: 1 из 2"
+        )
+        with page.expect_download() as download:
+            button.click()
+        file = tmp_path / f"{side}-download.docx"
+        download.value.save_as(file)
+        from zipfile import ZipFile
+
+        with ZipFile(file) as package:
+            assert b"D4D8DE" in package.read("word/document.xml")
+        page.locator("[data-show-unverified-toggle]").uncheck()
+        expect(button).to_be_enabled()
+        page.locator("[data-show-unverified-toggle]").check()
+        if pdf_failure:
+            expect(panel.locator("[data-export-pdf]")).to_have_attribute("aria-disabled", "true")
+
+
 def test_external_bot_link_opens_ready_read_only_result(live_server, browser_page, tmp_path):
     """Новый браузер открывает готовый результат, очищает fragment и сохраняет просмотр/экспорт."""
     from playwright.sync_api import expect

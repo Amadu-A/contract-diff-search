@@ -312,6 +312,9 @@ class ExportArtifact:
     path: str | None
     reason: str = ""
     show_unverified: bool = True
+    confirmed_only: bool = False
+    marked_changes: int = 0
+    unmarked_changes: int = 0
 
 
 @dataclass

@@ -1,9 +1,5 @@
 # app/infrastructure/exports.py
-"""Отдельные размеченные PDF и Word с проверкой содержания и геометрии.
-
-Исходные файлы не изменяются. Word доступен только после повторного рендера,
-подтвердившего тот же текст, страницы и расположение слов.
-"""
+"""Независимые PDF и редактируемые DOCX с проверкой сохранности исходного OOXML-пакета."""
 
 import io
 from collections import defaultdict
@@ -15,10 +11,13 @@ from zipfile import ZIP_DEFLATED, ZipFile
 import pdfplumber
 from lxml import etree
 from pypdf import PdfReader, PdfWriter
+from pypdf.errors import PyPdfError
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
+from app.application.ai_evidence import _span
 from app.domain.models import ComparisonResult, DocumentError, ExportArtifact
+from app.domain.text import normalize
 from app.domain.visibility import is_unverified, visible
 from app.infrastructure.pdf import render_page
 from app.infrastructure.storage import safe_xml
@@ -124,13 +123,48 @@ def _pdf_export(
     temporary.replace(target)
 
 
+def _run_text(run) -> str:
+    """Считает текстовые смещения так же, как исходный OOXML-reader, включая табуляции и переносы."""
+    return "".join(
+        (node.text or "")
+        if node.tag == tag("t")
+        else "\t"
+        if node.tag == tag("tab")
+        else "\n"
+        if node.tag in {tag("br"), tag("cr")}
+        else ""
+        for node in run
+    )
+
+
+def _simple_run(run) -> bool:
+    """Разрешает разделение только одного текстового узла без полей, рисунков и управляющих элементов."""
+    return len(run.findall("w:t", NS)) == 1 and all(
+        child.tag in {tag("rPr"), tag("t")} for child in run
+    )
+
+
+def _shade(run, color) -> None:
+    """Меняет только заливку копии run, сохраняя остальные свойства."""
+    props = run.find("w:rPr", NS)
+    if props is None:
+        props = etree.Element(tag("rPr"))
+        run.insert(0, props)
+    for old in props.findall("w:shd", NS):
+        props.remove(old)
+    shading = etree.SubElement(props, tag("shd"))
+    shading.set(tag("fill"), color)
+    shading.set(tag("val"), "clear")
+
+
 def shade_docx(
     source: Path,
     target: Path,
     ranges: dict[tuple[str, int], list[tuple[int, int]]],
     colors: dict | None = None,
-) -> None:
-    """Разделяет только простые текстовые runs, сохраняя содержимое и свойства."""
+) -> set[tuple[str, int, int, int]]:
+    """Размечает безопасные диапазоны; возвращает пропущенные заливки без отказа всего документа."""
+    skipped = {(part, index, a, b) for (part, index), spans in ranges.items() for a, b in spans}
     with ZipFile(source) as archive, ZipFile(target, "w", ZIP_DEFLATED) as output:
         for item in archive.infolist():
             data = archive.read(item)
@@ -139,53 +173,117 @@ def shade_docx(
                 root = safe_xml(data)
                 paragraphs = root.findall(".//w:p", NS)
                 for index, spans in relevant.items():
-                    paragraph, offset = paragraphs[index], 0
-                    for run in list(paragraph.findall(".//w:r", NS)):
-                        if next(run.iterancestors(tag("p")), None) is not paragraph:
-                            continue
-                        nodes = run.findall("w:t", NS)
-                        text = "".join(n.text or "" for n in nodes)
-                        end = offset + len(text)
+                    if not 0 <= index < len(paragraphs):
+                        continue
+                    paragraph, offset, runs = paragraphs[index], 0, []
+                    for run in paragraph.findall(".//w:r", NS):
+                        if next(run.iterancestors(tag("p")), None) is paragraph:
+                            text = _run_text(run)
+                            runs.append((run, offset, offset + len(text)))
+                            offset += len(text)
+                    safe = [
+                        (a, b)
+                        for a, b in spans
+                        if 0 <= a < b <= offset
+                        and all(
+                            _simple_run(run) or a <= x and b >= y
+                            for run, x, y in runs
+                            if b > x and a < y
+                        )
+                    ]
+                    for a, b in safe:
+                        skipped.discard((item.filename, index, a, b))
+                    for run, start, end in runs:
                         selected = [
-                            (max(0, a - offset), min(len(text), b - offset))
-                            for a, b in spans
-                            if b > offset and a < end
+                            (max(0, a - start), min(end - start, b - start))
+                            for a, b in safe
+                            if b > start and a < end
                         ]
-                        offset = end
                         if not selected:
                             continue
-                        if any(child.tag not in {tag("rPr"), tag("t")} for child in run):
-                            raise DocumentError("Нельзя безопасно разделить сложный Word-run")
+                        palette = (colors or {}).get((item.filename, index), [])
+                        if not _simple_run(run):
+                            chosen = [
+                                (priority, color)
+                                for x, y, color, priority in palette
+                                if start < y and end > x
+                            ]
+                            _shade(run, max(chosen)[1] if chosen else "D4D8DE")
+                            continue
+                        text = _run_text(run)
                         cuts = sorted(
                             {0, len(text), *(point for span in selected for point in span)}
                         )
                         parent, position = run.getparent(), run.getparent().index(run)
                         for a, b in zip(cuts, cuts[1:], strict=False):
-                            new = etree.Element(tag("r"), dict(run.attrib))
-                            props = deepcopy(run.find("w:rPr", NS))
-                            if props is None:
-                                props = etree.Element(tag("rPr"))
+                            new = deepcopy(run)
+                            node = new.find("w:t", NS)
+                            node.text = text[a:b]
+                            node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
                             if any(a < y and b > x for x, y in selected):
-                                for shading in props.findall("w:shd", NS):
-                                    props.remove(shading)
-                                shading = etree.SubElement(props, tag("shd"))
-                                palette = (colors or {}).get((item.filename, index), [])
                                 chosen = [
                                     (priority, color)
                                     for x, y, color, priority in palette
-                                    if a + end - len(text) < y and b + end - len(text) > x
+                                    if a + start < y and b + start > x
                                 ]
-                                shading.set(tag("fill"), max(chosen)[1] if chosen else "D4D8DE")
-                                shading.set(tag("val"), "clear")
-                            new.append(props)
-                            node = etree.SubElement(new, tag("t"))
-                            node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                            node.text = text[a:b]
+                                _shade(new, max(chosen)[1] if chosen else "D4D8DE")
+                            new.tail = run.tail if b == len(text) else None
                             parent.insert(position, new)
                             position += 1
                         parent.remove(run)
                 data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
             output.writestr(item, data)
+    return skipped
+
+
+def _word_xml_content(data):
+    """Нормализует только заливку и эквивалентное дробление runs для проверки сохранности XML."""
+    root = safe_xml(data)
+    for run in root.findall(".//w:r", NS):
+        props = run.find("w:rPr", NS)
+        if props is not None:
+            for shading in props.findall("w:shd", NS):
+                props.remove(shading)
+            if not len(props) and not props.attrib:
+                run.remove(props)
+    for node in root.iter():
+        if len(node) and node.text and node.text.isspace():
+            node.text = None
+        if node.tail and node.tail.isspace():
+            node.tail = None
+        if node.tag == tag("t"):
+            node.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    for parent in root.iter():
+        previous = None
+        for node in list(parent):
+            if node.tag != tag("r") or not _simple_run(node):
+                previous = None
+                continue
+            properties = node.find("w:rPr", NS)
+            key = (
+                tuple(sorted(node.attrib.items())),
+                etree.tostring(properties, method="c14n") if properties is not None else b"",
+                tuple(sorted(node.find("w:t", NS).attrib.items())),
+            )
+            if previous is not None and previous[0] == key:
+                target = previous[1].find("w:t", NS)
+                target.text = (target.text or "") + (node.find("w:t", NS).text or "")
+                parent.remove(node)
+            else:
+                previous = (key, node)
+    return etree.tostring(root, method="c14n")
+
+
+def _same_word_content(source, target, parts):
+    """Проверяет весь пакет: неизменные файлы побайтно, размеченный XML — без потери структуры/стилей."""
+    with ZipFile(source) as before, ZipFile(target) as after:
+        if before.namelist() != after.namelist():
+            return False
+        for name in before.namelist():
+            a, b = before.read(name), after.read(name)
+            if a != b and (name not in parts or _word_xml_content(a) != _word_xml_content(b)):
+                return False
+    return True
 
 
 def same_layout(first: Path, second: Path) -> bool:
@@ -223,109 +321,141 @@ class DocumentExporter:
         *,
         include_word: bool = True,
     ) -> dict[str, list[ExportArtifact]]:
-        """Создаёт оба варианта из одного результата; переключение не запускает OCR или сравнение."""
+        """Формирует оба PDF-варианта и отдельный подтверждённый DOCX, независимо от ошибок другого формата."""
         artifacts = {"old": [], "new": []}
-        for show_unverified in (True, False):
-            suffix = "" if show_unverified else "-clean"
-            for side, version in (("old", result.old), ("new", result.new)):
-                pdf = output / f"{side}-highlighted{suffix}.pdf"
-                _pdf_export(result, side, pdf, checkpoint, show_unverified)
-                artifacts[side].append(
-                    ExportArtifact("pdf", str(pdf), show_unverified=show_unverified)
-                )
-                if version.format not in {"doc", "docx"}:
-                    continue
-                if not include_word:
+        for side, version in (("old", result.old), ("new", result.new)):
+            for show in (True, False):
+                target = output / f"{side}-highlighted{'' if show else '-clean'}.pdf"
+                try:
+                    _pdf_export(result, side, target, checkpoint, show)
+                    artifacts[side].append(ExportArtifact("pdf", str(target), show_unverified=show))
+                except (DocumentError, OSError, PyPdfError) as exc:
                     artifacts[side].append(
                         ExportArtifact(
-                            version.format,
+                            "pdf",
                             None,
-                            "Word-экспорт готовится после завершения ИИ-проверки",
-                            show_unverified,
+                            str(exc)
+                            if isinstance(exc, DocumentError)
+                            else "Не удалось сформировать PDF с подсветкой",
+                            show,
                         )
                     )
-                    continue
-                try:
-                    target = self._word(result, side, output, checkpoint, show_unverified)
-                    artifacts[side].append(
-                        ExportArtifact(version.format, str(target), show_unverified=show_unverified)
+            if version.format not in {"doc", "docx"}:
+                continue
+            if not include_word:
+                artifacts[side].append(
+                    ExportArtifact(
+                        "docx", None, "DOCX готовится после завершения ИИ-проверки", False, True
                     )
-                except DocumentError as exc:
-                    artifacts[side].append(
-                        ExportArtifact(version.format, None, str(exc), show_unverified)
+                )
+                continue
+            try:
+                artifacts[side].append(self._word(result, side, output, checkpoint))
+            except (DocumentError, OSError):
+                artifacts[side].append(
+                    ExportArtifact(
+                        "docx", None, "Не удалось сформировать DOCX из исходного Word", False, True
                     )
+                )
         return artifacts
 
-    def _word(self, result, side, output, checkpoint, show_unverified):
-        """Сохраняет только проверенную вёрстку; предупреждения и ИИ имеют разные заливки."""
-        version = getattr(result, side)
-        if version.visual_only:
-            raise DocumentError("Нет надёжной логической привязки для Word-экспорта")
-        suffix = "" if show_unverified else "-clean"
+    def _word(self, result, side, output, checkpoint):
+        """Сохраняет исходный Word с безопасными серыми заливками, явно считая пропущенные изменения."""
+        checkpoint(f"Экспорт DOCX: {side}")
         source = output / side / "accepted.docx"
-        ranges, colors = defaultdict(list), defaultdict(list)
-        by_id = {e.id: e for e in version.elements}
+        logical = read_docx(source)
+        by_key = {(e.attributes["part"], int(e.attributes["paragraph_index"])): e for e in logical}
+        by_id = {e.id: e for e in getattr(result, side).elements}
+        ranges, planned, unmarked = defaultdict(list), {}, set()
         for difference in result.differences:
-            if not visible(difference, show_unverified):
-                continue
-            element = by_id.get(getattr(difference, side + "_element"))
-            text = getattr(difference, side + "_text")
-            areas = getattr(difference, side + "_regions")
-            if not areas and not text:
-                continue
-            if element is None:
-                if areas and (
-                    text or is_unverified(difference) or difference.category.startswith("graphic_")
-                ):
-                    raise DocumentError(
-                        "У части пометок нет безопасной логической привязки для Word"
-                    )
-                continue
-            if "part" not in element.attributes or "paragraph_index" not in element.attributes:
-                raise DocumentError("Нет безопасного OOXML-якоря для Word-экспорта")
-            if difference.category == "numbering_changed" and int(
-                element.attributes.get("prefix_length", "0")
-            ):
-                raise DocumentError("Подсветка автоматического номера не прошла проверку")
-            span = getattr(difference, side + "_range")
             if (
-                difference.source == "ai" or difference.verified_by.startswith("ai")
-            ) and span is None:
-                raise DocumentError("Цитата ИИ не привязана к диапазону Word")
-            span = span or (0, len(element.text))
-            prefix = int(element.attributes.get("prefix_length", "0"))
-            key = element.attributes["part"], int(element.attributes["paragraph_index"])
-            start, end = max(0, span[0] - prefix), max(0, span[1] - prefix)
-            ranges[key].append((start, end))
-            color, priority = (
-                ("E5D9FF", 2)
-                if difference.source == "ai" and difference.status != "confirmed"
-                else ("FFF0D0", 1)
-                if is_unverified(difference)
-                else ("D4D8DE", 3)
-            )
-            colors[key].append((start, end, color, priority))
-        target = output / f"{side}-highlighted{suffix}.docx"
-        temporary = output / f"{side}-highlighted{suffix}.pending.docx"
-        shade_docx(source, temporary, ranges, colors)
-        before, after = read_docx(source), read_docx(temporary)
-        if [(e.text, e.kind, e.section, e.attributes.get("grid")) for e in before] != [
-            (e.text, e.kind, e.section, e.attributes.get("grid")) for e in after
-        ]:
-            raise DocumentError("Содержание Word изменилось при нанесении заливки")
-        rendered = self.office.convert(
-            temporary, output / f"export-check-{side}{suffix}", "pdf", checkpoint
+                not difference.active
+                or difference.status != "confirmed"
+                or is_unverified(difference)
+            ):
+                continue
+            text = getattr(difference, side + "_text")
+            if (
+                side == "old"
+                and difference.category.endswith("_added")
+                or side == "new"
+                and difference.category.endswith("_deleted")
+            ):
+                continue
+            if (
+                not text
+                and not getattr(difference, side + "_regions")
+                and not getattr(difference, side + "_element")
+            ):
+                continue
+            located = self._word_range(difference, side, by_id, by_key)
+            if located is None:
+                unmarked.add(difference.id)
+                continue
+            part, index, start, end = located
+            ranges[(part, index)].append((start, end))
+            planned[difference.id] = located
+        target = output / f"{side}-highlighted.docx"
+        pending = output / f"{side}-highlighted.pending.docx"
+        skipped = shade_docx(source, pending, ranges)
+        unmarked.update(
+            identifier for identifier, location in planned.items() if location in skipped
         )
-        if not same_layout(Path(version.pdf), rendered):
-            raise DocumentError("Повторный рендер не подтвердил сохранность вёрстки Word")
-        temporary.replace(target)
-        if version.format == "doc":
-            target = self.office.convert(
-                target, output / f"export-doc-{side}{suffix}", "doc", checkpoint
-            )
-            roundtrip = self.office.convert(
-                target, output / f"export-doc-check-{side}{suffix}", "pdf", checkpoint
-            )
-            if not same_layout(Path(version.pdf), roundtrip):
-                raise DocumentError("Экспорт DOC изменил вёрстку")
-        return target
+        marked = len(planned) - sum(location in skipped for location in planned.values())
+        if not _same_word_content(source, pending, {part for part, _ in ranges}):
+            import shutil
+
+            shutil.copyfile(source, pending)
+            unmarked.update(planned)
+            marked = 0
+        pending.replace(target)
+        reason = (
+            f"Не размечено подтверждённых изменений: {len(unmarked)} из {marked + len(unmarked)}"
+            if unmarked
+            else ""
+        )
+        return ExportArtifact("docx", str(target), reason, False, True, marked, len(unmarked))
+
+    @staticmethod
+    def _word_range(difference, side, by_id, by_key):
+        """Сопоставляет подтверждённый текст с реальным OOXML-диапазоном без зависимости от PDF-координат."""
+        element = by_id.get(getattr(difference, side + "_element"))
+        text = getattr(difference, side + "_text")
+        span = getattr(difference, side + "_range")
+        if element is not None:
+            try:
+                key = element.attributes["part"], int(element.attributes["paragraph_index"])
+                original = by_key.get(key)
+            except (KeyError, ValueError):
+                original = None
+            if original is not None and original.text == element.text:
+                if (
+                    span
+                    and 0 <= span[0] < span[1] <= len(original.text)
+                    and (
+                        not text
+                        or normalize(original.text[span[0] : span[1]]).text == normalize(text).text
+                    )
+                ):
+                    return DocumentExporter._without_prefix(original, span)
+                if difference.category == "formatting_changed":
+                    return DocumentExporter._without_prefix(original, (0, len(original.text)))
+                found = _span(original.text, text, text) if text else None
+                if found:
+                    return DocumentExporter._without_prefix(original, found)
+        candidates = (
+            [(original, _span(original.text, text, text)) for original in by_key.values()]
+            if text
+            else []
+        )
+        candidates = [(original, found) for original, found in candidates if found]
+        return DocumentExporter._without_prefix(*candidates[0]) if len(candidates) == 1 else None
+
+    @staticmethod
+    def _without_prefix(element, span):
+        """Исключает вычисленный номер списка из текстовых смещений; саму нумерацию не меняет."""
+        prefix = int(element.attributes.get("prefix_length", "0"))
+        start, end = max(0, span[0] - prefix), span[1] - prefix
+        if end <= start:
+            return None
+        return element.attributes["part"], int(element.attributes["paragraph_index"]), start, end

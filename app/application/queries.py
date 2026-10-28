@@ -45,11 +45,20 @@ def summary(data: dict) -> dict:
         side: [
             {
                 "format": e["format"],
-                "available": bool(e["path"]) and data.get("exports_current", True),
-                "reason": e["reason"]
+                "available": bool(e["path"])
+                and data.get("exports_current", True)
+                and (e["format"] == "pdf" or bool(e.get("confirmed_only"))),
+                "reason": (
+                    e["reason"]
+                    if e["format"] == "pdf" or e.get("confirmed_only")
+                    else "Для нового DOCX выполните сравнение заново"
+                )
                 if data.get("exports_current", True)
                 else "Экспорт с текущими результатами ИИ ещё готовится",
                 "show_unverified": e.get("show_unverified", True),
+                "confirmed_only": e.get("confirmed_only", False),
+                "marked_changes": e.get("marked_changes", 0),
+                "unmarked_changes": e.get("unmarked_changes", 0),
             }
             for e in items
         ]

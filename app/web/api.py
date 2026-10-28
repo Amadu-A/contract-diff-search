@@ -480,7 +480,7 @@ def create_app(
         side: Literal["old", "new"],
         request: Request,
         service: Service,
-        format: Literal["pdf", "doc", "docx"] = "pdf",
+        format: Literal["pdf", "docx"] = "pdf",
         show_unverified: bool = True,
     ):
         """Выдаёт только реально созданный и проверенный артефакт владельцу задания."""
@@ -491,7 +491,12 @@ def create_app(
             (
                 e
                 for e in data["exports"].get(side, [])
-                if e["format"] == format and e.get("show_unverified", True) == show_unverified
+                if e["format"] == format
+                and (
+                    bool(e.get("confirmed_only"))
+                    if format == "docx"
+                    else e.get("show_unverified", True) == show_unverified
+                )
             ),
             None,
         )
@@ -499,8 +504,18 @@ def create_app(
             raise HTTPException(409, item["reason"] if item else "Этот формат экспорта недоступен")
         return FileResponse(
             item["path"],
-            filename=f"{side}-{'with-unverified' if show_unverified else 'changes-only'}.{format}",
-            media_type="application/octet-stream",
+            filename=f"{side}-highlighted.docx"
+            if format == "docx"
+            else f"{side}-{'with-unverified' if show_unverified else 'changes-only'}.pdf",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            if format == "docx"
+            else "application/octet-stream",
+            headers={
+                "X-Marked-Changes": str(item.get("marked_changes", 0)),
+                "X-Unmarked-Changes": str(item.get("unmarked_changes", 0)),
+            }
+            if format == "docx"
+            else None,
         )
 
     @app.get("/api/v1/comparisons/{job_id}/crop/{side}/{difference_id}")

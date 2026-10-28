@@ -76,14 +76,12 @@ def test_exports_keep_confirmed_and_ai_markers_but_hide_only_warnings(settings, 
             assert ((0.85, 0.5, 0.05) in colors) == show
             assert (0.48, 0.25, 0.8) in colors and (0.42, 0.46, 0.51) in colors
             if kind == "docx":
-                word = next(
-                    a for a in artifacts[side] if a.format == "docx" and a.show_unverified == show
-                )
+                word = next(a for a in artifacts[side] if a.format == "docx" and a.confirmed_only)
                 assert word.path, word.reason
                 with ZipFile(word.path) as archive:
                     xml = archive.read("word/document.xml")
-                assert (b"FFF0D0" in xml) == show
-                assert b"E5D9FF" in xml and b"D4D8DE" in xml
+                assert b"FFF0D0" not in xml and b"E5D9FF" not in xml
+                assert b"D4D8DE" in xml
                 assert [e.text for e in read_docx(Path(word.path))] == [
                     e.text for e in read_docx(tmp_path / side / "accepted.docx")
                 ]

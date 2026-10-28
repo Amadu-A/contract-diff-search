@@ -44,7 +44,7 @@ export class Viewer {
     root.querySelector('[data-search-next]').addEventListener('click', () => this.nextSearch());
     this.image.addEventListener('error', () => { if (this.job) this.onError(new Error('Не удалось загрузить страницу')); });
     root.querySelector('[data-export-word]').addEventListener('click', () => {
-      if (this.wordFormat) window.location.assign(jobUrl(this.job, `/export/${this.side}?format=${this.wordFormat}&show_unverified=${this.showUnverified}`));
+      if (this.wordFormat) window.location.assign(jobUrl(this.job, `/export/${this.side}?format=docx`));
     });
   }
 
@@ -76,14 +76,17 @@ export class Viewer {
       pdf.setAttribute('aria-disabled','true');
     }
     pdf.title = artifact?.reason || '';
-    pdf.textContent = this.showUnverified ? '⇩ PDF с изменениями и непроверенными областями' : '⇩ PDF только с изменениями';
-    const word = this.exports.find(item => item.format !== 'pdf' && (item.show_unverified ?? true) === this.showUnverified);
+    pdf.textContent = 'Скачать PDF';
+    const word = this.exports.find(item => item.format === 'docx' && item.confirmed_only);
     const button = this.root.querySelector('[data-export-word]');
-    button.hidden = !word;
+    button.hidden = !['doc','docx'].includes(this.document?.format);
     button.disabled = !word?.available;
-    button.title = word?.reason || 'Экспорт прошёл проверку содержания и вёрстки';
-    button.textContent = `▤ Скачать ${(word?.format || 'Word').toUpperCase()}`;
+    button.title = word?.reason || 'DOCX только с подтверждёнными изменениями';
+    button.textContent = 'Скачать DOCX';
     this.wordFormat = word?.available ? word.format : null;
+    const note = this.root.querySelector('[data-export-word-status]');
+    note.hidden = button.hidden || !word?.available || !word.unmarked_changes;
+    note.textContent = word?.unmarked_changes ? `Не размечено изменений: ${word.unmarked_changes} из ${word.unmarked_changes + word.marked_changes}. Остальная разметка сохранена.` : '';
   }
 
   /** Переключает слои и ссылки без повторного рендера, OCR и сравнения. */
@@ -216,7 +219,10 @@ export class Viewer {
     for (const control of this.root.querySelectorAll('button,select,input')) control.disabled = true;
     this.root.querySelector('[data-export-pdf]').removeAttribute('href');
     this.root.querySelector('[data-export-pdf]').setAttribute('aria-disabled', 'true');
-    this.root.querySelector('[data-export-word]').hidden = false;
+    this.root.querySelector('[data-export-word]').hidden = true;
+    this.root.querySelector('[data-export-word-status]').hidden = true;
+    this.exports = [];
+    this.wordFormat = null;
     this.root.querySelector('[data-search-form]').hidden = true;
     this.searchItems = [];
     this.regions = [];
