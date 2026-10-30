@@ -312,6 +312,13 @@ class DocumentExporter:
         """Принимает ограниченный конвертер из composition root."""
         self.office = office
 
+    @timed("comparison_report")
+    def report(self, projection: dict) -> bytes:
+        """Формирует независимый табличный PDF без доступа к OCR, исходникам или модели."""
+        from app.infrastructure.reports import render_report
+
+        return render_report(projection)
+
     @timed("document_export")
     def export(
         self,

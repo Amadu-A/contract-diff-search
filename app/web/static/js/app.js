@@ -14,6 +14,13 @@ if (readOnly && window.location.hash) history.replaceState(null, '', window.loca
 const start = document.querySelector('[data-start]');
 const cancel = document.querySelector('[data-cancel]');
 const progress = document.querySelector('[data-progress]');
+const reportDownload = document.querySelector('[data-export-report]');
+
+/** Убирает ссылку на прежний отчёт при новом запуске, сбросе и истечении TTL. */
+function clearReport() {
+  reportDownload.removeAttribute('href');
+  reportDownload.setAttribute('aria-disabled', 'true');
+}
 let currentJob = null;
 let generation = 0;
 let pollTimer;
@@ -62,6 +69,8 @@ document.querySelector('[data-show-unverified-toggle]').addEventListener('change
 async function displayResult(job, run, quiet = false) {
   const summary = await apiRequest(jobUrl(job.id, '/result'));
   if (run !== generation) return;
+  reportDownload.href = jobUrl(job.id, '/report');
+  reportDownload.removeAttribute('aria-disabled');
   if (displayedJob !== job.id) {
     await Promise.all(viewers.map(viewer => viewer.setDocument(job.id, summary.documents[viewer.side], summary.exports[viewer.side])));
     displayedJob = job.id;
@@ -150,6 +159,7 @@ form.addEventListener('submit', async submitEvent => {
   const run = ++generation;
   clearTimeout(pollTimer);
   results.clear();
+  clearReport();
   aiProgress.clear();
   displayedJob = null;
   lastAIRevision = '';
@@ -190,6 +200,7 @@ async function reset() {
   currentJob = null;
   expires = 0;
   results.clear();
+  clearReport();
   aiProgress.clear();
   displayedJob = null;
   lastAIRevision = '';
@@ -234,6 +245,7 @@ setInterval(() => {
     clearTimeout(pollTimer);
     viewers.forEach(viewer => viewer.clear());
     results.clear();
+    clearReport();
     aiProgress.clear();
     displayedJob = null;
     setBusy(false);

@@ -331,6 +331,7 @@ class ComparisonResult:
     exports: dict[str, list[ExportArtifact]] = field(default_factory=dict)
     ai_review: AIReviewState = field(default_factory=AIReviewState)
     exports_current: bool = True
+    comparison_exclusions: list[str] = field(default_factory=list)
 
 
 @dataclass

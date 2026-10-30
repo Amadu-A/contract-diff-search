@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from app.domain.comparison import regions
 from app.domain.models import ComparisonResult, Difference, ElementMatch, ReviewUnit, VisualRegion
-from app.domain.text import normalize
+from app.domain.text import content, excluded_pair, normalize
 from app.domain.visibility import is_unverified, uncertainty_ids
 
 
@@ -282,6 +282,15 @@ def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
     if reply.outcome == "same" and reply.complete and reply.readable and unit.kind != "coverage":
         _record_contradiction(result, unit)
     _resolve_refined_same(result, unit, reply)
+    old_text = {element.id: content(element.text) for element in result.old.elements}
+    new_text = {element.id: content(element.text) for element in result.new.elements}
+    original_old = {element.id: element.text for element in result.old.elements}
+    original_new = {element.id: element.text for element in result.new.elements}
+    excluded = {
+        (match.old[0], match.new[0]): (old_text[match.old[0]], new_text[match.new[0]])
+        for match in result.matches
+        if match.method == "comparison_exclusion"
+    }
     for observation in [*reply.findings, *reply.evidence]:
         a = _visual_anchor(
             result, unit, "old", observation.old_value, observation.old_quote, observation.old_ref
@@ -289,6 +298,32 @@ def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
         b = _visual_anchor(
             result, unit, "new", observation.new_value, observation.new_quote, observation.new_ref
         )
+        if (
+            a
+            and b
+            and not observation.category.startswith("graphic_")
+            and excluded.get((a.element, b.element))
+            == (content(observation.old_value), content(observation.new_value))
+        ):
+            continue
+        if (
+            a
+            and b
+            and a.element in original_old
+            and b.element in original_new
+            and not observation.category.startswith("graphic_")
+            and any(
+                match.old == [a.element] and match.new == [b.element] for match in result.matches
+            )
+            and excluded_pair(
+                original_old[a.element],
+                original_new[b.element],
+                a.span,
+                b.span,
+                result.comparison_exclusions,
+            )
+        ):
+            continue
         same = observation.category == "unchanged"
         addition = observation.category.endswith("_added")
         deletion = observation.category.endswith("_deleted")

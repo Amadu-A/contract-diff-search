@@ -21,6 +21,7 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
     app_host: str = "0.0.0.0"
+    comparison_exclusions_file: Path = ROOT / "config/comparison_exclusions.txt"
     app_bind_ip: str = "192.168.55.3"
     app_port: int = Field(8082, ge=1, le=65535)
     public_base_url: str = ""

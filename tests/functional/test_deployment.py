@@ -61,7 +61,9 @@ def mock_docker_main() -> int:
         if "config" in args:
             code = 0 if state["compose_config"] else 1
         elif "build" in args:
-            state["built"] = True
+            mirror = "PYTHON_BASE_IMAGE=mirror.gcr.io/library/python:3.12-slim-bookworm" in args
+            code = state.get("mirror_build_exit" if mirror else "primary_build_exit", 0)
+            state["built"] = code == 0
             output = "BUILD_DETAIL_FIRST\nImage test-app Built"
         elif "run" in args:
             if "app.provisioning" in args:
@@ -438,6 +440,33 @@ def test_test_script_keeps_failure_code_and_output(deployment, arguments):
     completed = run(script="test.sh", arguments=arguments)
     assert completed.returncode == 7
     assert "TEST_DETAIL_FIRST" in completed.stdout
+    assert len([event for event in state["journal"] if "build" in event["args"]]) == 1
+
+
+@pytest.mark.parametrize("script", ["up.sh", "test.sh"])
+@pytest.mark.parametrize("arguments", [(), ("--log",)])
+def test_build_falls_back_to_mirror_once(deployment, script, arguments):
+    """При отказе основной сборки существующая команда использует зеркало и продолжает только после успеха."""
+    state, run = deployment
+    configured(state)
+    state["primary_build_exit"] = 1
+    completed = run(script=script, arguments=arguments)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    builds = [event["args"] for event in state["journal"] if "build" in event["args"]]
+    assert len(builds) == 2
+    assert "PYTHON_BASE_IMAGE=mirror.gcr.io/library/python:3.12-slim-bookworm" in builds[1]
+
+
+@pytest.mark.parametrize("script", ["up.sh", "test.sh"])
+def test_mirror_build_error_stops_deployment_and_tests(deployment, script):
+    """Ошибка обоих источников сохраняет код отказа и не запускает старый образ как успешную проверку."""
+    state, run = deployment
+    configured(state)
+    state.update(primary_build_exit=1, mirror_build_exit=9)
+    completed = run(script=script)
+    assert completed.returncode == 9
+    assert state["up_count"] == 0
+    assert not any("run" in event["args"] for event in state["journal"])
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Проверка POSIX-группы процессов и GNU timeout")

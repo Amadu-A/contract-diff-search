@@ -148,10 +148,19 @@ def full_plan(
     make_units = partial(_make_units, region_limit=region_limit)
     old, new = {e.id: e for e in result.old.elements}, {e.id: e for e in result.new.elements}
     units, used_old, used_new = [], set(), set()
+    excluded = {
+        side: {
+            identifier
+            for match in result.matches
+            if match.method == "comparison_exclusion"
+            for identifier in getattr(match, side)
+        }
+        for side in ("old", "new")
+    }
     sections = sorted({e.section for e in [*old.values(), *new.values()]})
     for section in sections:
-        a = [e for e in old.values() if e.section == section]
-        b = [e for e in new.values() if e.section == section]
+        a = [e for e in old.values() if e.section == section and e.id not in excluded["old"]]
+        b = [e for e in new.values() if e.section == section and e.id not in excluded["new"]]
         # Карта видимых структурных опор, а не готовая матрица различий.
         headers_a = [
             DocumentElement(
@@ -170,6 +179,8 @@ def full_plan(
         a, b = [old[i] for i in match.old], [new[i] for i in match.new]
         used_old.update(match.old)
         used_new.update(match.new)
+        if match.method == "comparison_exclusion":
+            continue
         units.extend(
             make_units(
                 "full",
@@ -204,7 +215,8 @@ def full_plan(
                 elements = [
                     e
                     for e in source.elements
-                    if any(
+                    if e.id not in excluded[side]
+                    and any(
                         w.region.page == page.number
                         and w.region.y1 > area.y0
                         and w.region.y0 < area.y1

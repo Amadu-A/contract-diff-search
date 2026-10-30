@@ -9,6 +9,45 @@ from app.domain.models import TERMINAL, Difference, JobStatus
 from app.domain.visibility import visible
 
 
+def comparison_report(data: dict, job) -> dict:
+    """Проецирует сохранённые уникальные факты и реальные статусы без запуска анализа."""
+    unique = {}
+    for item in data["differences"]:
+        if not item.get("active", True):
+            continue
+        key = tuple(
+            str(item.get(name, ""))
+            for name in (
+                "category",
+                "old_section",
+                "new_section",
+                "old_text",
+                "new_text",
+                "old_element",
+                "new_element",
+                "old_range",
+                "new_range",
+                "status",
+                "old_regions",
+                "new_regions",
+            )
+        )
+        if key not in unique:
+            unique[key] = dict(item)
+        elif unique[key].get("source") != item.get("source"):
+            unique[key]["verified_by"] = "algorithms_and_ai"
+    items = list(unique.values())
+    return {
+        "old_name": data["old"]["name"],
+        "new_name": data["new"]["name"],
+        "ai_full": bool(job.ai_full),
+        "ai_unverified": bool(job.ai_unverified),
+        "ai_status": data.get("ai_status", "not_requested"),
+        "statistics": statistics([Difference(**item) for item in items]),
+        "differences": items,
+    }
+
+
 def integration_status(job, data: dict | None) -> dict:
     """Проецирует текущие счётчики для внешнего клиента без содержимого документов и предварительного TTL."""
     ready = job.status in {JobStatus.COMPLETED, JobStatus.WARNINGS} and data is not None

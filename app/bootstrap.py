@@ -48,6 +48,13 @@ def build_service(settings: Settings) -> ComparisonService:
             settings.max_session_jobs,
             settings.retention_seconds,
             settings.job_timeout_seconds,
+            frozenset(
+                line.strip()
+                for line in settings.comparison_exclusions_file.read_text(
+                    encoding="utf-8-sig"
+                ).splitlines()
+                if line.strip()
+            ),
         ),
         ImageComparer(),
     )

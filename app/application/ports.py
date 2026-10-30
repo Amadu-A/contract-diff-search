@@ -134,6 +134,10 @@ class DocumentExtractor(Protocol):
 class Exporter(Protocol):
     """Формирует отдельные проверенные PDF и безопасные Word-копии."""
 
+    def report(self, projection: dict) -> bytes:
+        """Формирует табличный PDF исключительно по проекции сохранённого результата."""
+        ...
+
     def export(
         self,
         result: ComparisonResult,

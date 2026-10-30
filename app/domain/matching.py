@@ -18,11 +18,11 @@ from app.domain.algorithms import (
     smith_waterman,
 )
 from app.domain.models import DocumentElement, ElementMatch
-from app.domain.text import content, normalize, shingles, similarity, tokens
+from app.domain.text import content, exclusion_value, normalize, shingles, similarity, tokens
 
 
 def match_elements(
-    old: list[DocumentElement], new: list[DocumentElement]
+    old: list[DocumentElement], new: list[DocumentElement], exclusions: frozenset[str] = frozenset()
 ) -> tuple[list[ElementMatch], set[str], set[str]]:
     """Сопоставляет структуру, перемещения и дробление; возвращает спорные идентификаторы."""
     a = [content(e.text) for e in old]
@@ -37,7 +37,44 @@ def match_elements(
             used_a.add(i)
             used_b.add(j)
 
-    anchors = patience(a, b)
+    # Исключения относятся к целому значению, а не к знакам внутри слов/чисел.
+    excluded_a = {i for i, value in enumerate(a) if exclusion_value(value, exclusions)}
+    excluded_b = {j for j, value in enumerate(b) if exclusion_value(value, exclusions)}
+    anchors = [(i, j) for i, j in patience(a, b) if i not in excluded_a and j not in excluded_b]
+
+    def exclusion_pair(i, j):
+        """Разрешает пару только в одном пункте/ячейке, не перенося тире между разделами."""
+        left, right = old[i], new[j]
+        if left.section != right.section or left.kind != right.kind:
+            return
+        if any(
+            left.attributes.get(k, "") != right.attributes.get(k, "") for k in ("column", "row_key")
+        ):
+            return
+        add(i, j, "comparison_exclusion")
+
+    # Уникальная структурная позиция важнее самого повторяющегося символа.
+    indexed_a, indexed_b = defaultdict(list), defaultdict(list)
+    for elements, indices, indexed in ((old, excluded_a, indexed_a), (new, excluded_b, indexed_b)):
+        for index in indices:
+            element = elements[index]
+            if element.section or element.attributes.get("row_key"):
+                indexed[
+                    (
+                        element.section,
+                        element.kind,
+                        element.attributes.get("row_key", ""),
+                        element.attributes.get("column", ""),
+                    )
+                ].append(index)
+    for key in indexed_a.keys() & indexed_b.keys():
+        if len(indexed_a[key]) == len(indexed_b[key]) == 1:
+            exclusion_pair(indexed_a[key][0], indexed_b[key][0])
+    # Между теми же опорами безопасна единственная пара целых значений.
+    borders = [(-1, -1), *anchors, (len(a), len(b))]
+    for (ai, bi), (aj, bj) in zip(borders, borders[1:], strict=False):
+        if aj - ai == bj - bi == 2 and ai + 1 in excluded_a and bi + 1 in excluded_b:
+            exclusion_pair(ai + 1, bi + 1)
     for i, j in anchors:
         add(i, j, "patience")
     # Histogram работает внутри опорных окон: одинаковая фраза из другого раздела не подходит.

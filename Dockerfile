@@ -1,6 +1,8 @@
 # Dockerfile
 # Один образ API, worker и уборки; OCR и LibreOffice без запуска от root.
-FROM python:3.12-slim-bookworm AS dependencies
+ARG PYTHON_BASE_IMAGE=python:3.12-slim-bookworm
+# scripts/up.sh и scripts/test.sh при отказе повторяют сборку с mirror.gcr.io/library/python:3.12-slim-bookworm.
+FROM ${PYTHON_BASE_IMAGE} AS dependencies
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     HOME=/tmp/contract-diff OMP_THREAD_LIMIT=1 OPENBLAS_NUM_THREADS=1 \
     OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 BLIS_NUM_THREADS=1 \
@@ -19,6 +21,7 @@ ENV PYTHONPYCACHEPREFIX=/tmp/python-cache
 RUN mkdir -p /srv/app/.data /srv/app/.cache && chown app:app /srv/app/.data /srv/app/.cache
 
 FROM dependencies AS runtime
+COPY --chown=app:app config ./config
 COPY --chown=app:app app ./app
 COPY --chown=app:app .env.example pyproject.toml ./
 USER app
@@ -32,6 +35,7 @@ RUN apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=30 update \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements-dev.lock ./
 RUN pip install --require-hashes -r requirements-dev.lock
+COPY --chown=app:app config ./config
 COPY --chown=app:app app ./app
 COPY --chown=app:app .env.example pyproject.toml ./
 COPY --chown=app:app tests ./tests

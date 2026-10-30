@@ -474,6 +474,20 @@ def create_app(
         """Определяет связанную страницу по совпавшим элементам, без равенства номеров страниц."""
         return queries.correspondence(read_result(job_id, request, service), side, page)
 
+    @app.get("/api/v1/comparisons/{job_id}/report")
+    def report(job_id: UUID, request: Request, service: Service):
+        """Скачивает отчёт с теми же правами владельца/Telegram-сессии и TTL, что исходный результат."""
+        data = read_result(job_id, request, service)
+        projection = queries.comparison_report(data, service.repository.get(str(job_id)))
+        return Response(
+            service.exporter.report(projection),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": 'attachment; filename="comparison-report.pdf"',
+                "Cache-Control": "no-store",
+            },
+        )
+
     @app.get("/api/v1/comparisons/{job_id}/export/{side}")
     def export(
         job_id: UUID,

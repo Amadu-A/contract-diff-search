@@ -48,6 +48,31 @@ def content(text: str) -> str:
     return NUMBER.sub("", normalize(text).text)
 
 
+def exclusion_value(text: str, values) -> bool:
+    """Не позволяет расширением списка отключить проверку чисел, дат и дефисов внутри слов."""
+    value = text.strip()
+    return value in values and not re.search(r"\d|(?<=\w)[\-–—−]+(?=\w)", value)
+
+
+def excluded_pair(old: str, new: str, a, b, values) -> bool:
+    """Разрешает целые значения в сопоставленном диапазоне, сохраняя дефисы слов, числа и даты."""
+    if (
+        not a
+        or not b
+        or not exclusion_value(old[slice(*a)], values)
+        or not exclusion_value(new[slice(*b)], values)
+    ):
+        return False
+    for text, (start, end) in ((old, a), (new, b)):
+        # Прилегающие буквы/цифры означают составное слово, знак числа или дату.
+        if start and text[start - 1].isalnum() or end < len(text) and text[end].isalnum():
+            return False
+        left, right = text[:start].rstrip(), text[end:].lstrip()
+        if left and left[-1].isdigit() or right and right[0].isdigit():
+            return False
+    return True
+
+
 def shingles(text: str, size: int = 3) -> set[tuple[str, ...]]:
     """Строит словесные n-граммы для ограниченного поиска частичных соответствий."""
     words = tuple(t[0].casefold() for t in tokens(content(text)))

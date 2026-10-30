@@ -32,6 +32,40 @@ from tests.unit.test_ai_review import Reviewer
 pytestmark = pytest.mark.browser
 
 
+def test_report_button_alignment_download_and_reset(live_server, browser_page, tmp_path):
+    """Одна новая кнопка стоит под списком на уровне PDF, скачивает отчёт и очищается при сбросе."""
+    from playwright.sync_api import expect
+
+    page = browser_page
+    url, _ = live_server
+    page.goto(url)
+    button = page.locator("[data-export-report]")
+    expect(button).not_to_have_attribute("href")
+    for side, amount in (("old", 70), ("new", 50)):
+        path = pdf(tmp_path / f"{side}.pdf", [f"2.2. Advance payment is {amount}%."])
+        page.locator(f"[data-upload={side}] [data-file-input]").set_input_files(str(path))
+    page.locator("[data-start]").click()
+    expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
+    expect(button).to_contain_text("Скачать отчёт")
+    report_box = button.bounding_box()
+    pdf_box = page.locator("[data-viewer=old] [data-export-pdf]").bounding_box()
+    assert report_box["x"] < pdf_box["x"]
+    assert abs(report_box["y"] - pdf_box["y"]) < 2
+    with page.expect_download() as downloaded:
+        button.click()
+    output = tmp_path / "report.pdf"
+    downloaded.value.save_as(output)
+    assert "70%" in PdfReader(output).pages[0].extract_text()
+    screenshots = ROOT / ".cache/report-qa"
+    screenshots.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(screenshots / "button-desktop.png"), full_page=True)
+    page.set_viewport_size({"width": 800, "height": 900})
+    expect(button).to_be_visible()
+    page.locator("[data-reset]").click()
+    expect(button).not_to_have_attribute("href")
+    expect(button).to_have_attribute("aria-disabled", "true")
+
+
 @pytest.mark.parametrize(
     "partner_format,pdf_failure", [("pdf", False), ("docx", False), ("pdf", True)]
 )
@@ -168,6 +202,12 @@ def test_external_bot_link_opens_ready_read_only_result(live_server, browser_pag
         downloaded.value.save_as(path)
         assert len(PdfReader(path).pages) == 1
     browser_page.reload()
+    expect(browser_page.locator('[data-stat="total"]')).to_have_text("1")
+    with browser_page.expect_download() as downloaded:
+        browser_page.locator("[data-export-report]").click()
+    path = tmp_path / "telegram-report.pdf"
+    downloaded.value.save_as(path)
+    assert "70" in PdfReader(path).pages[0].extract_text()
     expect(browser_page.locator('[data-stat="total"]')).to_have_text("1")
     assert not errors
 

@@ -14,7 +14,7 @@ from app.domain.models import (
     DocumentVersion,
     VisualRegion,
 )
-from app.domain.text import NUMBER, content, normalize, tokens
+from app.domain.text import NUMBER, content, excluded_pair, normalize, tokens
 from app.domain.visibility import is_unverified, uncertainty_ids
 
 
@@ -36,7 +36,10 @@ def regions(element: DocumentElement, start: int = 0, end: int | None = None) ->
 
 
 def _text_differences(
-    old: DocumentElement, new: DocumentElement, ocr_involved: bool = False
+    old: DocumentElement,
+    new: DocumentElement,
+    ocr_involved: bool = False,
+    exclusions: frozenset[str] = frozenset(),
 ) -> list[Difference]:
     """Сравнивает локальные токены, не теряя проценты, отрицания и пунктуацию."""
     ta, tb = tokens(old.text), tokens(new.text)
@@ -61,6 +64,12 @@ def _text_differences(
         br = (tb[inserted[0]][1], tb[inserted[-1]][2]) if inserted else None
         before = old.text[slice(*ar)] if ar else ""
         after = new.text[slice(*br)] if br else ""
+        if (not old.section or not new.section or old.section == new.section) and excluded_pair(
+            old.text, new.text, ar, br, exclusions
+        ):
+            deleted.clear()
+            inserted.clear()
+            return
         numeric = bool(re.search(r"\d", before + after))
         category = "number_modified" if numeric and ar and br else "text_modified"
         if ar is None:
@@ -148,9 +157,10 @@ def compare(
     old: DocumentVersion,
     new: DocumentVersion,
     visual_scores: dict[tuple[str, str], float] | None = None,
+    exclusions: frozenset[str] = frozenset(),
 ) -> ComparisonResult:
     """Выполняет структурное сравнение; каждый узел получает итоговую классификацию."""
-    matches, ambiguous_a, ambiguous_b = match_elements(old.elements, new.elements)
+    matches, ambiguous_a, ambiguous_b = match_elements(old.elements, new.elements, exclusions)
     oa, nb = {e.id: e for e in old.elements}, {e.id: e for e in new.elements}
     coverage_a, coverage_b, differences = {}, {}, []
     compare_format = (
@@ -162,6 +172,9 @@ def compare(
         )
     )
     for match in matches:
+        if match.method == "comparison_exclusion":
+            coverage_a[match.old[0]] = coverage_b[match.new[0]] = "unchanged"
+            continue
         before, after = oa[match.old[0]], nb[match.new[0]]
         changes = []
         if (len(match.old) > 1 or len(match.new) > 1) and old.format == new.format:
@@ -186,7 +199,7 @@ def compare(
                 for version in (old, new)
                 for page in version.pages
             )
-            changes.extend(_text_differences(before, after, ocr_involved))
+            changes.extend(_text_differences(before, after, ocr_involved, exclusions))
             old_number, new_number = NUMBER.match(before.text), NUMBER.match(after.text)
             if (
                 old_number
@@ -431,6 +444,7 @@ def compare(
         warnings=old.warnings
         + new.warnings
         + (["Не все изменения имеют надёжную геометрическую привязку"] if missing else []),
+        comparison_exclusions=sorted(exclusions),
     )
 
 

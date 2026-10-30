@@ -57,7 +57,10 @@ if [[ -f .env ]]; then args+=(--env-file .env); fi
 stage 'Проверка Compose'
 docker compose "${args[@]}" config --quiet
 stage 'Сборка образа приложения'
-run_command docker compose --progress plain "${args[@]}" build api
+if ! run_command docker compose --progress plain "${args[@]}" build api; then
+  stage 'Основная сборка не удалась; повтор с базовым образом из mirror.gcr.io'
+  run_command docker compose --progress plain "${args[@]}" build --build-arg PYTHON_BASE_IMAGE=mirror.gcr.io/library/python:3.12-slim-bookworm api
+fi
 # Settings читает dotenv как данные: source/eval здесь недопустимы.
 stage 'Чтение настроек через Pydantic (одноразовый контейнер)'
 if ! broker_config="$(docker compose "${args[@]}" run --rm --no-deps -T api python -m app.provisioning)"; then
