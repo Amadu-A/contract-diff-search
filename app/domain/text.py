@@ -4,6 +4,9 @@
 import re
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
+
+EquivalenceGroups = tuple[tuple[str, ...], ...]
 
 TOKEN = re.compile(r"\d+(?:[.,]\d+)*(?:\s?[%₽€$])?|[^\W\d_]+|[^\w\s]", re.UNICODE)
 SECTION = re.compile(r"^(?=\d{1,3}\.)(\d{1,3}(?:\.\d{1,3}){0,6})\.?\s+")
@@ -16,6 +19,7 @@ class NormalizedText:
 
     text: str
     positions: tuple[int, ...]
+    ends: tuple[int, ...] = ()
 
 
 def normalize(text: str) -> NormalizedText:
@@ -48,29 +52,74 @@ def content(text: str) -> str:
     return NUMBER.sub("", normalize(text).text)
 
 
-def exclusion_value(text: str, values) -> bool:
-    """Не позволяет расширением списка отключить проверку чисел, дат и дефисов внутри слов."""
-    value = text.strip()
-    return value in values and not re.search(r"\d|(?<=\w)[\-–—−]+(?=\w)", value)
+@lru_cache(maxsize=32)
+def _equivalence_pattern(groups: EquivalenceGroups) -> tuple[re.Pattern, dict[str, str]]:
+    """Компилирует независимые буквальные замены; длинное значение имеет приоритет."""
+    replacements = {value: group[0] for group in groups for value in group}
+    pattern = re.compile(
+        "|".join(re.escape(v) for v in sorted(replacements, key=len, reverse=True))
+    )
+    return pattern, replacements
 
 
-def excluded_pair(old: str, new: str, a, b, values) -> bool:
-    """Разрешает целые значения в сопоставленном диапазоне, сохраняя дефисы слов, числа и даты."""
-    if (
-        not a
-        or not b
-        or not exclusion_value(old[slice(*a)], values)
-        or not exclusion_value(new[slice(*b)], values)
-    ):
+def canonicalize(text: str, groups: EquivalenceGroups = ()) -> NormalizedText:
+    """Применяет группы только к поисковой копии, сохраняя начала и концы исходных диапазонов."""
+    normalized = normalize(text)
+    if not groups:
+        return normalized
+    pattern, replacements = _equivalence_pattern(tuple(tuple(group) for group in groups))
+    chars, positions, ends = [], [], []
+    cursor = 0
+    for match in pattern.finditer(normalized.text):
+        chars.append(normalized.text[cursor : match.start()])
+        positions.extend(normalized.positions[cursor : match.start()])
+        ends.extend(p + 1 for p in normalized.positions[cursor : match.start()])
+        replacement = replacements[match.group()]
+        chars.append(replacement)
+        positions.extend([normalized.positions[match.start()]] * len(replacement))
+        ends.extend([normalized.positions[match.end() - 1] + 1] * len(replacement))
+        cursor = match.end()
+    chars.append(normalized.text[cursor:])
+    positions.extend(normalized.positions[cursor:])
+    ends.extend(p + 1 for p in normalized.positions[cursor:])
+    return NormalizedText("".join(chars), tuple(positions), tuple(ends))
+
+
+def comparison_tokens(text: str, groups: EquivalenceGroups = ()) -> list[tuple[str, int, int]]:
+    """Сравнивает канонические токены независимо от OCR-разбиения, возвращая исходные диапазоны."""
+    mapped = canonicalize(text, groups)
+    return [
+        (
+            value.replace(" ", "") if value[0].isdigit() else value,
+            mapped.positions[start],
+            mapped.ends[end - 1] if mapped.ends else mapped.positions[end - 1] + 1,
+        )
+        for value, start, end in tokens(mapped.text)
+    ]
+
+
+def comparison_content(text: str, groups: EquivalenceGroups = ()) -> str:
+    """Даёт ключ содержимого для сопоставления, игнорируя только настроенные замены и OCR-пробелы."""
+    value = content(text)
+    return " ".join(t[0] for t in comparison_tokens(value, groups)) if groups else value
+
+
+def exclusion_value(text: str, groups: EquivalenceGroups) -> bool:
+    """Распознаёт целое значение группы для структурного сопоставления и оценки OCR знаков."""
+    return any(text.strip() in group for group in groups)
+
+
+def excluded_pair(old: str, new: str, a, b, groups: EquivalenceGroups) -> bool:
+    """Проверяет эквивалентность соответствующих диапазонов без удаления окружающего содержания."""
+    if not a or not b or not groups:
         return False
-    for text, (start, end) in ((old, a), (new, b)):
-        # Прилегающие буквы/цифры означают составное слово, знак числа или дату.
-        if start and text[start - 1].isalnum() or end < len(text) and text[end].isalnum():
-            return False
-        left, right = text[:start].rstrip(), text[end:].lstrip()
-        if left and left[-1].isdigit() or right and right[0].isdigit():
-            return False
-    return True
+    before, after = old[slice(*a)], new[slice(*b)]
+    return (
+        bool(before.strip() and after.strip())
+        and any(value in before or value in after for group in groups for value in group)
+        and [t[0] for t in comparison_tokens(before, groups)]
+        == [t[0] for t in comparison_tokens(after, groups)]
+    )
 
 
 def shingles(text: str, size: int = 3) -> set[tuple[str, ...]]:

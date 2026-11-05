@@ -188,6 +188,34 @@ def test_all_nine_format_combinations(settings, extractor, tmp_path, old_format,
             ]
 
 
+def test_docx_and_scanned_pdf_apply_equivalence_before_ai_and_export(settings, extractor, tmp_path):
+    """Настоящие Word-рендер и OCR сравниваются с группой тире без ложной адресной проверки."""
+    from app.application.ai_planning import unverified_plan
+    from app.domain.comparison import statistics
+
+    if not shutil.which(settings.soffice_command) or not shutil.which(settings.tesseract_command):
+        pytest.skip("Требуются LibreOffice и Tesseract; Linux-образ включает оба")
+    word = docx(tmp_path / "source.docx", ["2.2. Contract - delivery within 30 days."])
+    native = pdf(tmp_path / "native.pdf", ["2.2. Contract — delivery within 30 days."])
+    scanned = tmp_path / "scanned.pdf"
+    image = render_page(native, 1, 3)
+    drawing = canvas.Canvas(str(scanned), pagesize=(595, 842))
+    drawing.drawImage(ImageReader(image), 0, 0, 595, 842)
+    drawing.showPage()
+    drawing.save()
+    image.close()
+    assert PdfReader(scanned).pages[0].extract_text() == ""
+    source_bytes, scan_bytes = word.read_bytes(), scanned.read_bytes()
+    old = extractor.extract(word, "source.docx", tmp_path / "old", False, checkpoint)
+    new = extractor.extract(scanned, "scanned.pdf", tmp_path / "new", False, checkpoint)
+    assert new.pages[0].mode == "scanned" and new.elements
+    result = compare(old, new, exclusions=(("-", "—", "–"),))
+    assert result.differences == []
+    assert statistics(result.differences)["unverified"] == 0
+    assert unverified_plan(result, 3600, 6) == []
+    assert word.read_bytes() == source_bytes and scanned.read_bytes() == scan_bytes
+
+
 def test_phash_ssim_detect_small_local_edit():
     """Общий perceptual hash не скрывает маленькую изменённую цифру на рисунке."""
     a = Image.new("RGB", (200, 100), "white")

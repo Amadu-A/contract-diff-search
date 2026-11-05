@@ -32,6 +32,50 @@ from tests.unit.test_ai_review import Reviewer
 pytestmark = pytest.mark.browser
 
 
+def test_unverified_filters_include_ambiguous_matches_without_design_changes(
+    live_server, browser_page, tmp_path
+):
+    """Категория и статус показывают те же неоднозначности, что счётчик; выключатель скрывает их."""
+    from playwright.sync_api import expect
+
+    from tests.factories import version
+    from tests.fakes import FakeExtractor
+
+    url, service = live_server
+    old = version(["2.2. Аванс 70%", "3.1. Товар поставляется в течение 30 дней"], "pdf")
+    new = version(
+        [
+            "2.2. Аванс 50%",
+            "3.1. Товар поставляется в течение 31 дней",
+            "3.1. Товар поставляется в течение 32 дней",
+        ],
+        "pdf",
+    )
+    path = pdf(tmp_path / "input.pdf", ["2.2. Advance payment"], pages=3)
+    old.pdf = new.pdf = str(path)
+    service.extractor = FakeExtractor(old, new)
+    page = browser_page
+    page.goto(url)
+    for side in ("old", "new"):
+        page.locator(f"[data-upload={side}] [data-file-input]").set_input_files(str(path))
+    page.locator("[data-start]").click()
+    expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
+    expect(page.locator('[data-stat="unverified"]')).to_have_text("3")
+    expect(page.locator("[data-warning]")).to_be_visible()
+    page.locator("[data-filter-toggle]").click()
+    page.locator("[data-category-filter]").select_option("unverified_region")
+    expect(page.locator("[data-differences] [data-index]")).to_have_count(3)
+    expect(page.locator("[data-detail-reason]")).to_contain_text("Недостаточно доказательств")
+    page.locator("[data-category-filter]").select_option("ambiguous_match")
+    expect(page.locator("[data-differences] [data-index]")).to_have_count(3)
+    page.locator("[data-category-filter]").select_option("")
+    page.locator("[data-status-filter]").select_option("unverified")
+    expect(page.locator("[data-differences] [data-index]")).to_have_count(3)
+    page.locator("[data-show-unverified-toggle]").uncheck()
+    expect(page.locator("[data-differences] [data-index]")).to_have_count(1)
+    expect(page.locator('[data-stat="unverified"]')).to_have_text("3")
+
+
 def test_report_button_alignment_download_and_reset(live_server, browser_page, tmp_path):
     """Одна новая кнопка стоит под списком на уровне PDF, скачивает отчёт и очищается при сбросе."""
     from playwright.sync_api import expect

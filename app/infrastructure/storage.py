@@ -163,7 +163,12 @@ class FileStorage:
 
     def restore_result(self, job_id: str) -> ComparisonResult:
         """Восстанавливает типизированный checkpoint без повторного чтения/OCR оригиналов."""
-        return TypeAdapter(ComparisonResult).validate_python(self.read_result(job_id))
+        data = self.read_result(job_id)
+        exclusions = data.get("comparison_exclusions", [])
+        if exclusions and isinstance(exclusions[0], str):
+            # Старые сохранённые результаты содержали один плоский список эквивалентных значений.
+            data["comparison_exclusions"] = [exclusions]
+        return TypeAdapter(ComparisonResult).validate_python(data)
 
     def cleanup_transients(self, older_than: float) -> None:
         """Чистит только lo-профили заданного корня, не затрагивая активную конвертацию."""

@@ -3,13 +3,41 @@
 
 from app.application.ai_review import AILimits, AIReviewCoordinator
 from app.application.service import ComparisonService, Limits
+from app.domain.text import EquivalenceGroups, normalize
 from app.runtime import configure_native_threads
 from app.settings import Settings
+
+
+def load_exclusions(settings: Settings) -> EquivalenceGroups:
+    """Читает UTF-8-группы; ошибочная строка или пересечение групп останавливает запуск с пояснением."""
+    path = settings.comparison_exclusions_file
+    groups, seen = [], set()
+    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        group = tuple(normalize(value.strip()).text for value in line[1:-1].split(","))
+        if (
+            not line.startswith("[")
+            or not line.endswith("]")
+            or len(group) < 2
+            or any(not value or "[" in value or "]" in value for value in group)
+            or len(set(group)) != len(group)
+            or seen.intersection(group)
+        ):
+            raise ValueError(
+                f"{path}: строка {number}: ожидается группа [значение, значение]; "
+                "значения должны быть непустыми и не повторяться внутри или между группами"
+            )
+        groups.append(group)
+        seen.update(group)
+    return tuple(groups)
 
 
 def build_service(settings: Settings) -> ComparisonService:
     """Собирает адаптеры явно; прикладные сценарии ничего не знают об их классах."""
     configure_native_threads(settings)
+    exclusions = load_exclusions(settings)
     from app.infrastructure.ai_geometry import PdfGeometryRefiner
     from app.infrastructure.exports import DocumentExporter
     from app.infrastructure.ocr import TesseractOCR
@@ -48,13 +76,7 @@ def build_service(settings: Settings) -> ComparisonService:
             settings.max_session_jobs,
             settings.retention_seconds,
             settings.job_timeout_seconds,
-            frozenset(
-                line.strip()
-                for line in settings.comparison_exclusions_file.read_text(
-                    encoding="utf-8-sig"
-                ).splitlines()
-                if line.strip()
-            ),
+            exclusions,
         ),
         ImageComparer(),
     )

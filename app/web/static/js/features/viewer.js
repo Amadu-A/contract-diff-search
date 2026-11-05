@@ -1,7 +1,7 @@
 // app/web/static/js/features/viewer.js
 /** Один ленивый просмотрщик: страницы, масштаб, поворот, поиск и точные области. */
 import { apiRequest, jobUrl } from '../api.js';
-import { boundedPage, visibleDifference } from '../state.js';
+import { boundedPage, isUnverified, visibleDifference } from '../state.js';
 
 export class Viewer {
   /** Подключает реальные действия к панели одной стороны; хранит только текущую страницу. */
@@ -154,7 +154,7 @@ export class Viewer {
       region.dataset.differenceId = item.id;
       if (item.status === 'needs_review') region.classList.add('viewer__region--review');
       if (item.category.endsWith('_added')) region.classList.add('viewer__region--added');
-      if (['unverified_region','ambiguous_match'].includes(item.category) || item.status === 'unverified') region.classList.add('viewer__region--warning');
+      if (isUnverified(item)) region.classList.add('viewer__region--warning');
       if (item.id === this.selected) region.classList.add('viewer__region--selected');
       if (item.category === 'search') region.classList.add('viewer__region--search');
       region.style.left = `${r.x0 / page.width * 100}%`;

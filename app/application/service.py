@@ -36,6 +36,7 @@ from app.domain.models import (
     DocumentError,
     JobStatus,
 )
+from app.domain.text import EquivalenceGroups
 from app.observability import timed
 
 
@@ -47,7 +48,7 @@ class Limits:
     max_session_jobs: int
     retention: int
     timeout: int
-    comparison_exclusions: frozenset[str] = frozenset()
+    comparison_exclusions: EquivalenceGroups = ()
 
 
 def owner_hash(capability: str) -> str:

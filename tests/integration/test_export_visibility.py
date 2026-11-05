@@ -74,7 +74,8 @@ def test_exports_keep_confirmed_and_ai_markers_but_hide_only_warnings(settings, 
                 if operator in (b"RG", b"rg")
             }
             assert ((0.85, 0.5, 0.05) in colors) == show
-            assert (0.48, 0.25, 0.8) in colors and (0.42, 0.46, 0.51) in colors
+            assert ((0.48, 0.25, 0.8) in colors) == show
+            assert (0.42, 0.46, 0.51) in colors
             if kind == "docx":
                 word = next(a for a in artifacts[side] if a.format == "docx" and a.confirmed_only)
                 assert word.path, word.reason

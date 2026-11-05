@@ -55,7 +55,12 @@ def test_accepted_visual_checkpoint_updates_statistics_and_pdf_before_final_word
         for word, stats in observations
     )
     assert observations[-1][0] is True
-    assert result["statistics"]["ai_confirmed"] == 1 and result["statistics"]["unverified"] == 0
+    assert result["statistics"]["ai_confirmed"] == 1
+    # Страничный fake также возвращает одну непривязанную гипотезу: общий фильтр теперь честно учитывает её.
+    assert result["statistics"]["unverified"] == result["statistics"]["ai_needs_review"] == 1
+    unverified = client.get(f"/api/v1/comparisons/{job['id']}/differences?status=unverified").json()
+    assert len(unverified["items"]) == 1
+    assert unverified["items"][0]["status"] == "needs_review"
     assert service.extractor.calls == 2
 
 

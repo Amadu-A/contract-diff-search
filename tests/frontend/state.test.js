@@ -2,7 +2,7 @@
 /** Независимые проверки правил формы и границ навигации без браузерного DOM. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fileError, boundedPage, terminalStatus, categoryLabel, visibleDifference } from '../../app/web/static/js/state.js';
+import { fileError, boundedPage, terminalStatus, categoryLabel, isUnverified, visibleDifference } from '../../app/web/static/js/state.js';
 
 test('валидация принимает все три формата и граничный размер', () => {
   for (const name of ['a.doc','b.DOCX','c.pdf']) assert.equal(fileError({name,size:1024**2},1),'');
@@ -27,4 +27,18 @@ test('скрытие предупреждений сохраняет подтв�
   assert.deepEqual(items.filter(item => visibleDifference(item,false)),[fact]);
   assert.equal(warning.status,'unverified');
   assert.deepEqual(items.filter(item => visibleDifference(item,true)),[warning,fact]);
+});
+test('все активные неподтверждённые события имеют единое правило видимости', () => {
+  for (const item of [
+    {category:'ambiguous_match',status:'ambiguous'},
+    {category:'ambiguous_match',status:'confirmed'},
+    {category:'unverified_region',status:'confirmed'},
+    {category:'number_modified',status:'unverified'},
+    {category:'text_modified',status:'needs_review'},
+  ]) {
+    assert.equal(isUnverified(item),true);
+    assert.equal(visibleDifference(item,false),false);
+    assert.equal(isUnverified({...item,active:false}),false);
+  }
+  assert.equal(isUnverified({category:'number_modified',status:'confirmed'}),false);
 });

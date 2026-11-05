@@ -29,7 +29,7 @@ export function categoryLabel(category) {
 }
 /** Проверяет предупреждение без изменения данных, их статусов и покрытия. */
 export function isUnverified(item) {
-  return item.active !== false && (['unverified','ambiguous'].includes(item.status) || ['unverified_region','ambiguous_match'].includes(item.category));
+  return item.active !== false && (['unverified','ambiguous','needs_review'].includes(item.status) || ['unverified_region','ambiguous_match'].includes(item.category));
 }
 
 /** Применяет только визуальную настройку; подтверждённые изменения всегда остаются. */

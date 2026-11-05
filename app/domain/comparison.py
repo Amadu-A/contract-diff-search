@@ -14,7 +14,14 @@ from app.domain.models import (
     DocumentVersion,
     VisualRegion,
 )
-from app.domain.text import NUMBER, content, excluded_pair, normalize, tokens
+from app.domain.text import (
+    NUMBER,
+    EquivalenceGroups,
+    canonicalize,
+    comparison_content,
+    comparison_tokens,
+    exclusion_value,
+)
 from app.domain.visibility import is_unverified, uncertainty_ids
 
 
@@ -35,25 +42,23 @@ def regions(element: DocumentElement, start: int = 0, end: int | None = None) ->
     return result
 
 
+def _low_confidence(element: DocumentElement, exclusions: EquivalenceGroups) -> bool:
+    """Не переносит низкую уверенность отдельного эквивалентного знака на весь надёжно прочитанный текст."""
+    uncertain = [w for w in element.words if w.confidence < 0.65 or not w.verified]
+    return element.confidence < 0.65 and not (
+        uncertain and all(exclusion_value(w.text, exclusions) for w in uncertain)
+    )
+
+
 def _text_differences(
     old: DocumentElement,
     new: DocumentElement,
     ocr_involved: bool = False,
-    exclusions: frozenset[str] = frozenset(),
+    exclusions: EquivalenceGroups = (),
 ) -> list[Difference]:
     """Сравнивает локальные токены, не теряя проценты, отрицания и пунктуацию."""
-    ta, tb = tokens(old.text), tokens(new.text)
-    # Сравнение исходного отображения после безопасной нормализации пробелов.
-    edits = myers(
-        [
-            normalize(t[0]).text.replace(" ", "") if t[0][0].isdigit() else normalize(t[0]).text
-            for t in ta
-        ],
-        [
-            normalize(t[0]).text.replace(" ", "") if t[0][0].isdigit() else normalize(t[0]).text
-            for t in tb
-        ],
-    )
+    ta, tb = comparison_tokens(old.text, exclusions), comparison_tokens(new.text, exclusions)
+    edits = myers([t[0] for t in ta], [t[0] for t in tb])
     result, deleted, inserted = [], [], []
 
     def flush() -> None:
@@ -64,12 +69,6 @@ def _text_differences(
         br = (tb[inserted[0]][1], tb[inserted[-1]][2]) if inserted else None
         before = old.text[slice(*ar)] if ar else ""
         after = new.text[slice(*br)] if br else ""
-        if (not old.section or not new.section or old.section == new.section) and excluded_pair(
-            old.text, new.text, ar, br, exclusions
-        ):
-            deleted.clear()
-            inserted.clear()
-            return
         numeric = bool(re.search(r"\d", before + after))
         category = "number_modified" if numeric and ar and br else "text_modified"
         if ar is None:
@@ -98,7 +97,6 @@ def _text_differences(
                 if prefix + suffix < min(len(before), len(after)):
                     ar = (ar[0] + prefix, ar[1] - suffix)
                     br = (br[0] + prefix, br[1] - suffix)
-        confidence = min(old.confidence, new.confidence)
         changed_words = [
             w
             for e, span in ((old, ar), (new, br))
@@ -106,8 +104,9 @@ def _text_differences(
             for w in e.words
             if w.end > span[0] and w.start < span[1]
         ]
-        uncertain = confidence < 0.65 or any(
-            w.confidence < 0.65 or not w.verified for w in changed_words
+        uncertain = any(_low_confidence(e, exclusions) for e in (old, new)) or any(
+            (w.confidence < 0.65 or not w.verified) and not exclusion_value(w.text, exclusions)
+            for w in changed_words
         )
         if ocr_involved and before and after:
             punctuation = not any(char.isalnum() for char in before + after)
@@ -157,7 +156,7 @@ def compare(
     old: DocumentVersion,
     new: DocumentVersion,
     visual_scores: dict[tuple[str, str], float] | None = None,
-    exclusions: frozenset[str] = frozenset(),
+    exclusions: EquivalenceGroups = (),
 ) -> ComparisonResult:
     """Выполняет структурное сравнение; каждый узел получает итоговую классификацию."""
     matches, ambiguous_a, ambiguous_b = match_elements(old.elements, new.elements, exclusions)
@@ -205,7 +204,8 @@ def compare(
                 old_number
                 and new_number
                 and old_number.group().strip() != new_number.group().strip()
-                and content(before.text) == content(after.text)
+                and comparison_content(before.text, exclusions)
+                == comparison_content(after.text, exclusions)
             ):
                 changes = [
                     c for c in changes if not c.old_range or c.old_range[0] >= old_number.end()
@@ -255,8 +255,9 @@ def compare(
             if (
                 compare_format
                 and before.runs != after.runs
-                and content(before.text) == content(after.text)
-                and _style_signature(before) != _style_signature(after)
+                and comparison_content(before.text, exclusions)
+                == comparison_content(after.text, exclusions)
+                and _style_signature(before, exclusions) != _style_signature(after, exclusions)
             ):
                 # Сдвиг диапазонов из-за текста не является отдельным форматным событием.
                 changes.append(
@@ -319,7 +320,7 @@ def compare(
                 )
             )
         state = "changed" if changes else "unchanged"
-        if min(before.confidence, after.confidence) < 0.65 or any(
+        if any(_low_confidence(e, exclusions) for e in (before, after)) or any(
             w.confidence < 0.65 or not w.verified
             for e in (before, after)
             for w in e.words
@@ -367,7 +368,7 @@ def compare(
                     new_regions=regions(element) if side == "new" else [],
                     old_element=element.id if side == "old" else None,
                     new_element=element.id if side == "new" else None,
-                    status="unverified" if state == "unverified" else "confirmed",
+                    status=state if state in {"unverified", "ambiguous"} else "confirmed",
                     reason="Место на отсутствующей стороне не установлено"
                     if state == "changed"
                     else "Недостаточно доказательств",
@@ -376,6 +377,21 @@ def compare(
     for side, version in (("old", old), ("new", new)):
         for page in version.pages:
             for warning in page.warnings:
+                if warning == "Значительная часть OCR имеет низкую достоверность":
+                    low = [
+                        (element, word)
+                        for element in version.elements
+                        for word in element.words
+                        if word.region.page == page.number
+                        and (word.confidence < 0.65 or not word.verified)
+                    ]
+                    coverage = coverage_a if side == "old" else coverage_b
+                    if low and all(
+                        exclusion_value(word.text, exclusions)
+                        and coverage.get(element.id) in {"unchanged", "changed"}
+                        for element, word in low
+                    ):
+                        continue
                 rect = VisualRegion(page.number, 0, 0, page.width, page.height)
                 differences.append(
                     Difference(
@@ -444,7 +460,7 @@ def compare(
         warnings=old.warnings
         + new.warnings
         + (["Не все изменения имеют надёжную геометрическую привязку"] if missing else []),
-        comparison_exclusions=sorted(exclusions),
+        comparison_exclusions=[list(group) for group in exclusions],
     )
 
 
@@ -546,14 +562,17 @@ def _group_uncertainties(differences, matches) -> None:
                 )
 
 
-def _style_signature(element: DocumentElement) -> tuple:
-    """Сравнивает оформление символов, не считая техническое разбиение runs изменением."""
+def _style_signature(element: DocumentElement, exclusions: EquivalenceGroups = ()) -> tuple:
+    """Сравнивает оформление эквивалентного текста без ложных сдвигов от runs и замен разной длины."""
     styles = [()] * len(element.text)
     for run in element.runs:
         styles[max(0, run.start) : min(len(styles), run.end)] = [run.properties] * max(
             0, min(len(styles), run.end) - max(0, run.start)
         )
-    return tuple(styles[i] for i, char in enumerate(element.text) if not char.isspace())
+    mapped = canonicalize(element.text, exclusions)
+    return tuple(
+        styles[mapped.positions[i]] for i, char in enumerate(mapped.text) if not char.isspace()
+    )
 
 
 def _graphics(

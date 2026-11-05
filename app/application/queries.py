@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 from app.domain.comparison import statistics
 from app.domain.models import TERMINAL, Difference, JobStatus
-from app.domain.visibility import visible
+from app.domain.visibility import is_unverified, visible
 
 
 def comparison_report(data: dict, job) -> dict:
@@ -133,12 +133,17 @@ def filter_differences(
         d
         for d in data["differences"]
         if visible(d, show_unverified)
-        and (not category or d["category"] == category)
+        and (
+            not category
+            or (is_unverified(d) if category == "unverified_region" else d["category"] == category)
+        )
         and (
             not status
-            or d["status"] == status
-            or status == "unverified"
-            and d["category"] == "unverified_region"
+            or (
+                is_unverified(d)
+                if status == "unverified"
+                else d["status"] == status and not (status == "confirmed" and is_unverified(d))
+            )
         )
     ]
     return {"total": len(items), "items": items[offset : offset + limit]}

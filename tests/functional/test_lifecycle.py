@@ -78,6 +78,49 @@ def test_end_to_end_status_result_filters_search_and_delete(client, service, tmp
     assert not service.storage.directory(job["id"]).exists()
 
 
+def test_all_active_uncertainties_share_filters_statistics_and_visibility(
+    client, service, tmp_path
+):
+    """Оба фильтра включают неоднозначности, OCR и гипотезы ИИ; архив и подтверждённые факты отделены."""
+    from app.domain.models import Difference
+
+    job_id = upload(client, tmp_path).json()["id"]
+    service.process(job_id)
+    result = service.storage.restore_result(job_id)
+    result.differences = [
+        Difference("A", "ambiguous_match", "Неоднозначно", status="ambiguous"),
+        Difference("L", "ambiguous_match", "Старый ошибочный статус", status="confirmed"),
+        Difference("U", "unverified_region", "Пробел покрытия", status="unverified"),
+        Difference("O", "number_modified", "Неуверенное OCR", status="unverified"),
+        Difference("I", "text_modified", "Гипотеза ИИ", status="needs_review", source="ai"),
+        Difference("F", "number_modified", "Подтверждено", status="confirmed"),
+        Difference("X", "ambiguous_match", "Архив", status="ambiguous", active=False),
+    ]
+    service.storage.write_result(job_id, result)
+    base = f"/api/v1/comparisons/{job_id}"
+    summary = client.get(base + "/result").json()
+    assert summary["statistics"]["unverified"] == 5
+    assert summary["statistics"]["ambiguous"] == 2
+    assert summary["statistics"]["total"] == 1
+    expected = {"A", "L", "U", "O", "I"}
+    for query in (
+        "category=unverified_region",
+        "status=unverified",
+        "category=unverified_region&status=unverified",
+    ):
+        data = client.get(base + "/differences?" + query).json()
+        assert {item["id"] for item in data["items"]} == expected
+        assert data["total"] == 5
+        hidden = client.get(base + "/differences?" + query + "&show_unverified=false").json()
+        assert hidden == {"total": 0, "items": []}
+    ambiguous = client.get(base + "/differences?category=ambiguous_match").json()
+    assert {item["id"] for item in ambiguous["items"]} == {"A", "L"}
+    confirmed = client.get(base + "/differences?status=confirmed").json()
+    assert [item["id"] for item in confirmed["items"]] == ["F"]
+    assert client.get(base + "/differences?status=unverified&offset=2&limit=2").json()["total"] == 5
+    assert service.storage.restore_result(job_id).differences[0].status == "ambiguous"
+
+
 def test_foreign_session_and_csrf(client, service, settings, tmp_path):
     """UUID без правильной cookie не даёт доступ; изменяющие межсайтовые запросы закрыты."""
     job = upload(client, tmp_path).json()

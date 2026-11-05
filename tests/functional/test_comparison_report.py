@@ -52,6 +52,35 @@ def test_report_uses_saved_result_without_restarting_pipeline(client, service, t
     assert service.extractor.calls == before
 
 
+def test_excluded_inline_changes_have_no_rows_statistics_or_ui_items(client, service, tmp_path):
+    """Сохранённое сравнение групп не возвращает ложные записи ни в UI, ни в PDF-отчёт."""
+    from dataclasses import replace
+
+    from app.domain.comparison import compare
+    from tests.factories import version
+    from tests.fakes import FakeExtractor
+
+    service.limits = replace(service.limits, comparison_exclusions=(("-", "—", "–"),))
+    service.extractor = FakeExtractor(
+        version(["2.2. Санкт-Петербург, далее - Исполнитель"]),
+        version(["2.2. Санкт—Петербург, далее – Исполнитель"], "pdf"),
+    )
+    job_id = report_job(client, service, tmp_path)
+    base = f"/api/v1/comparisons/{job_id}"
+    assert client.get(base + "/differences").json() == {"total": 0, "items": []}
+    stats = client.get(base + "/result").json()["statistics"]
+    assert stats["total"] == stats["unverified"] == 0
+    response = client.get(base + "/report")
+    assert response.status_code == 200
+    text = "\n".join(p.extract_text() for p in PdfReader(io.BytesIO(response.content)).pages)
+    assert "Санкт" not in text
+    assert not compare(
+        service.extractor.old,
+        service.extractor.new,
+        exclusions=service.limits.comparison_exclusions,
+    ).differences
+
+
 def test_long_fragments_ai_status_and_deduplication(client, service, tmp_path):
     """Длинная строка переносится между страницами; AI-факт и гипотеза имеют разные статусы."""
     job_id = report_job(client, service, tmp_path)

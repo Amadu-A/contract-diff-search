@@ -5,10 +5,10 @@ from app.domain.models import Difference
 
 
 def is_unverified(item: Difference | dict) -> bool:
-    """Относит к предупреждениям только активные непроверенные/неоднозначные события."""
+    """Относит к предупреждениям все активные неподтверждённые события, включая гипотезы ИИ."""
     values = item if isinstance(item, dict) else vars(item)
     return values.get("active", True) and (
-        values.get("status") in {"unverified", "ambiguous"}
+        values.get("status") in {"unverified", "ambiguous", "needs_review"}
         or values.get("category") in {"unverified_region", "ambiguous_match"}
     )
 

@@ -373,10 +373,12 @@ def test_ai_cannot_confirm_different_parties_and_can_upgrade_review_after_eviden
     reply = AIReply("different", True, [AIObservation("number_modified", "70%", "50%", "o0", "n0")])
     merge_reply(result, unit, reply)
     assert len(result.differences) == 1 and result.differences[0].status == "needs_review"
+    assert statistics(result.differences)["unverified"] == 1
     result.new.elements[0].attributes["column"] = "0"
     merge_reply(result, unit, reply)
     assert len(result.differences) == 1 and result.differences[0].status == "confirmed"
-    assert not result.ai_review.resolutions
+    assert result.ai_review.resolutions == {result.differences[0].id: "different"}
+    assert statistics(result.differences)["unverified"] == 0
 
 
 def test_resume_retains_proof_for_already_resolved_targets():

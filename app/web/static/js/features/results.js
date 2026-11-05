@@ -1,7 +1,7 @@
 // app/web/static/js/features/results.js
 /** Фильтры, реальные счётчики, список и детали; недоверенные строки выводятся textContent. */
 import { apiRequest, jobUrl } from '../api.js';
-import { categoryLabel } from '../state.js';
+import { categoryLabel, isUnverified } from '../state.js';
 
 export class Results {
   /** Подключает список к двум просмотрщикам и обработчику ошибок. */
@@ -100,7 +100,7 @@ export class Results {
       title.textContent = item.title;
       const meta = document.createElement('small');
       const page = item.new_regions[0]?.page || item.old_regions[0]?.page;
-      meta.textContent = `${page ? `Стр. ${page} · ` : ''}${categoryLabel(item.category)}${item.status === 'unverified' ? ' · Не проверено' : ''}`;
+      meta.textContent = `${page ? `Стр. ${page} · ` : ''}${categoryLabel(item.category)}${isUnverified(item) ? ' · Не проверено' : ''}`;
       summary.append(title, meta);
       button.append(number, summary);
       button.addEventListener('click', () => this.select(index));

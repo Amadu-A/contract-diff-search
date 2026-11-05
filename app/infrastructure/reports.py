@@ -239,7 +239,7 @@ def render_report(report: dict) -> bytes:
                 "unverified": "Не проверено",
                 "ambiguous": "Неоднозначно",
             }.get(item["status"], item["status"])
-            if is_unverified(item):
+            if is_unverified(item) and item["status"] != "needs_review":
                 status = (
                     "Неоднозначно"
                     if item["category"] == "ambiguous_match" or item["status"] == "ambiguous"

@@ -18,15 +18,24 @@ from app.domain.algorithms import (
     smith_waterman,
 )
 from app.domain.models import DocumentElement, ElementMatch
-from app.domain.text import content, exclusion_value, normalize, shingles, similarity, tokens
+from app.domain.text import (
+    EquivalenceGroups,
+    comparison_content,
+    content,
+    excluded_pair,
+    exclusion_value,
+    shingles,
+    similarity,
+    tokens,
+)
 
 
 def match_elements(
-    old: list[DocumentElement], new: list[DocumentElement], exclusions: frozenset[str] = frozenset()
+    old: list[DocumentElement], new: list[DocumentElement], exclusions: EquivalenceGroups = ()
 ) -> tuple[list[ElementMatch], set[str], set[str]]:
     """Сопоставляет структуру, перемещения и дробление; возвращает спорные идентификаторы."""
-    a = [content(e.text) for e in old]
-    b = [content(e.text) for e in new]
+    a = [comparison_content(e.text, exclusions) for e in old]
+    b = [comparison_content(e.text, exclusions) for e in new]
     used_a, used_b, matches = set(), set(), []
     ambiguous_a, ambiguous_b = set(), set()
 
@@ -37,9 +46,9 @@ def match_elements(
             used_a.add(i)
             used_b.add(j)
 
-    # Исключения относятся к целому значению, а не к знакам внутри слов/чисел.
-    excluded_a = {i for i, value in enumerate(a) if exclusion_value(value, exclusions)}
-    excluded_b = {j for j, value in enumerate(b) if exclusion_value(value, exclusions)}
+    # Повторяющиеся целые значения группы не служат содержательными опорами между разделами.
+    excluded_a = {i for i, e in enumerate(old) if exclusion_value(content(e.text), exclusions)}
+    excluded_b = {j for j, e in enumerate(new) if exclusion_value(content(e.text), exclusions)}
     anchors = [(i, j) for i, j in patience(a, b) if i not in excluded_a and j not in excluded_b]
 
     def exclusion_pair(i, j):
@@ -47,8 +56,13 @@ def match_elements(
         left, right = old[i], new[j]
         if left.section != right.section or left.kind != right.kind:
             return
+        before, after = content(left.text), content(right.text)
+        if not excluded_pair(before, after, (0, len(before)), (0, len(after)), exclusions):
+            return
         if any(
-            left.attributes.get(k, "") != right.attributes.get(k, "") for k in ("column", "row_key")
+            comparison_content(left.attributes.get(k, ""), exclusions)
+            != comparison_content(right.attributes.get(k, ""), exclusions)
+            for k in ("column", "row_key")
         ):
             return
         add(i, j, "comparison_exclusion")
@@ -63,7 +77,7 @@ def match_elements(
                     (
                         element.section,
                         element.kind,
-                        element.attributes.get("row_key", ""),
+                        comparison_content(element.attributes.get("row_key", ""), exclusions),
                         element.attributes.get("column", ""),
                     )
                 ].append(index)
@@ -81,17 +95,23 @@ def match_elements(
     borders = [(-1, -1), *anchors, (len(a), len(b))]
     for (ai, bi), (aj, bj) in zip(borders, borders[1:], strict=False):
         for i, j in histogram(a[ai + 1 : aj], b[bi + 1 : bj]):
-            if old[ai + 1 + i].section == new[bi + 1 + j].section:
+            if (
+                ai + 1 + i not in excluded_a
+                and bi + 1 + j not in excluded_b
+                and old[ai + 1 + i].section == new[bi + 1 + j].section
+            ):
                 add(ai + 1 + i, bi + 1 + j, "histogram")
 
     # Поиск точных перенесённых блоков через rolling hash с обязательной проверкой текста.
     index = rolling_hash(b, 1)
     for i, value in enumerate(a):
-        if i in used_a or len(value) < 12:
+        if i in used_a or i in excluded_a or len(value) < 12:
             continue
         hashes = rolling_hash([value], 1)
         candidates = [
-            j for j in index.get(next(iter(hashes)), []) if j not in used_b and b[j] == value
+            j
+            for j in index.get(next(iter(hashes)), [])
+            if j not in used_b and j not in excluded_b and b[j] == value
         ]
         if len(candidates) == 1:
             add(i, candidates[0], "rabin_karp")
@@ -106,12 +126,14 @@ def match_elements(
             for count in (2, 3):
                 group = right[j : j + count]
                 if len(group) == count and not any(j + k in occupied_r for k in range(count)):
-                    combined = normalize(" ".join(content(e.text) for e in group)).text
+                    combined = comparison_content(
+                        " ".join(content(e.text) for e in group), exclusions
+                    )
                     grouped[combined].append((j, count))
         for i, element in enumerate(left):
             if i in occupied_l or len(element.text) < 30:
                 continue
-            expected = normalize(content(element.text)).text
+            expected = comparison_content(element.text, exclusions)
             candidates = [
                 (j, count)
                 for j, count in grouped.get(expected, [])
@@ -133,16 +155,16 @@ def match_elements(
 
     sections, grams = defaultdict(list), defaultdict(set)
     for j, element in enumerate(new):
-        if j not in used_b:
+        if j not in used_b and j not in excluded_b:
             sections[element.section].append(j)
-            for gram in shingles(element.text):
+            for gram in shingles(b[j]):
                 grams[gram].add(j)
     pending = []
     for i, element in enumerate(old):
-        if i in used_a:
+        if i in used_a or i in excluded_a:
             continue
         votes = Counter(
-            j for gram in shingles(element.text) if len(grams[gram]) <= 128 for j in grams[gram]
+            j for gram in shingles(a[i]) if len(grams[gram]) <= 128 for j in grams[gram]
         )
         candidates = set(j for j, _ in votes.most_common(24))
         if element.section:
@@ -159,7 +181,7 @@ def match_elements(
                 and element.attributes["column"] != other.attributes["column"]
             ):
                 continue
-            score = similarity(element.text, other.text)
+            score = similarity(a[i], b[j])
             same_section = bool(element.section and element.section == other.section)
             if same_section and 3 <= max(len(a[i]), len(b[j])) <= 64:
                 distance = damerau_levenshtein(a[i], b[j])
@@ -172,8 +194,8 @@ def match_elements(
                 )
             if same_section:
                 score += 0.18
-            label_a = re.sub(r"\d+", "", element.text).strip().casefold()
-            label_b = re.sub(r"\d+", "", other.text).strip().casefold()
+            label_a = re.sub(r"\d+", "", a[i]).strip().casefold()
+            label_b = re.sub(r"\d+", "", b[j]).strip().casefold()
             if label_a and label_a == label_b and re.search(r"\d{8,}", element.text + other.text):
                 score += 0.3
             # Строки таблиц с устойчивым первым столбцом имеют приоритет.
