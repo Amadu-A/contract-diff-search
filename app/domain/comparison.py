@@ -21,6 +21,7 @@ from app.domain.text import (
     comparison_content,
     comparison_tokens,
     exclusion_value,
+    ocr_equivalent,
 )
 from app.domain.visibility import is_unverified, uncertainty_ids
 
@@ -50,11 +51,21 @@ def _low_confidence(element: DocumentElement, exclusions: EquivalenceGroups) -> 
     )
 
 
+def uses_ocr(document: DocumentVersion, element: DocumentElement) -> bool:
+    """Определяет участие OCR на страницах фрагмента, а не на соседнем скане смешанного PDF."""
+    pages = {w.region.page for w in element.words}
+    return any(
+        (not pages or p.number in pages) and p.mode in {"scanned", "mixed", "visual_ocr"}
+        for p in document.pages
+    )
+
+
 def _text_differences(
     old: DocumentElement,
     new: DocumentElement,
     ocr_involved: bool = False,
     exclusions: EquivalenceGroups = (),
+    ocr_exclusions: EquivalenceGroups = (),
 ) -> list[Difference]:
     """Сравнивает локальные токены, не теряя проценты, отрицания и пунктуацию."""
     ta, tb = comparison_tokens(old.text, exclusions), comparison_tokens(new.text, exclusions)
@@ -104,6 +115,20 @@ def _text_differences(
             for w in e.words
             if w.end > span[0] and w.start < span[1]
         ]
+        if (
+            ocr_involved
+            and ocr_equivalent(before, after, old.text, new.text, ocr_exclusions)
+            and changed_words
+            and ar
+            and br
+            and regions(old, *ar)
+            and regions(new, *br)
+            and all(w.verified and w.confidence >= 0.8 for w in changed_words)
+            and min(old.confidence, new.confidence) >= 0.65
+        ):
+            deleted.clear()
+            inserted.clear()
+            return
         uncertain = any(_low_confidence(e, exclusions) for e in (old, new)) or any(
             (w.confidence < 0.65 or not w.verified) and not exclusion_value(w.text, exclusions)
             for w in changed_words
@@ -116,7 +141,13 @@ def _text_differences(
                 or max(len(before), len(after)) <= 512
                 and damerau_levenshtein(before, after) <= 1
             )
-            uncertain = uncertain or punctuation or missing_digit or short_letter
+            homoglyphs = (
+                bool(ocr_exclusions)
+                and before != after
+                and canonicalize(before, ocr_exclusions).text
+                == canonicalize(after, ocr_exclusions).text
+            )
+            uncertain = uncertain or punctuation or missing_digit or short_letter or homoglyphs
         result.append(
             Difference(
                 "",
@@ -133,7 +164,14 @@ def _text_differences(
                 ar,
                 br,
                 "unverified" if uncertain else "confirmed",
-                reason="Требуется проверка распознавания" if uncertain else "",
+                reason="Обнаружено различие OCR. Требуется адресная повторная проверка"
+                if uncertain
+                else "",
+                unverified_reason="missing_geometry"
+                if uncertain and (ar and not regions(old, *ar) or br and not regions(new, *br))
+                else "ocr_uncertain"
+                if uncertain
+                else "",
             )
         )
         if cell_change:
@@ -157,9 +195,16 @@ def compare(
     new: DocumentVersion,
     visual_scores: dict[tuple[str, str], float] | None = None,
     exclusions: EquivalenceGroups = (),
+    ocr_exclusions: EquivalenceGroups = (),
 ) -> ComparisonResult:
     """Выполняет структурное сравнение; каждый узел получает итоговую классификацию."""
-    matches, ambiguous_a, ambiguous_b = match_elements(old.elements, new.elements, exclusions)
+    ocr_involved = any(
+        p.mode in {"scanned", "mixed", "visual_ocr"} for v in (old, new) for p in v.pages
+    )
+    active_ocr_groups = ocr_exclusions if ocr_involved else ()
+    matches, ambiguous_a, ambiguous_b = match_elements(
+        old.elements, new.elements, exclusions, active_ocr_groups
+    )
     oa, nb = {e.id: e for e in old.elements}, {e.id: e for e in new.elements}
     coverage_a, coverage_b, differences = {}, {}, []
     compare_format = (
@@ -193,12 +238,10 @@ def compare(
                 )
             )
         elif len(match.old) == 1 and len(match.new) == 1:
-            ocr_involved = any(
-                page.mode in {"scanned", "mixed", "visual_ocr"}
-                for version in (old, new)
-                for page in version.pages
+            ocr_involved = uses_ocr(old, before) or uses_ocr(new, after)
+            changes.extend(
+                _text_differences(before, after, ocr_involved, exclusions, active_ocr_groups)
             )
-            changes.extend(_text_differences(before, after, ocr_involved, exclusions))
             old_number, new_number = NUMBER.match(before.text), NUMBER.match(after.text)
             if (
                 old_number
@@ -461,7 +504,107 @@ def compare(
         + new.warnings
         + (["Не все изменения имеют надёжную геометрическую привязку"] if missing else []),
         comparison_exclusions=[list(group) for group in exclusions],
+        ocr_comparison_exclusions=[list(group) for group in ocr_exclusions],
     )
+
+
+def resolve_ocr(
+    result: ComparisonResult,
+    difference: Difference,
+    old_reading: str | None,
+    new_reading: str | None,
+    *,
+    confidence: float = 0,
+    error: str = "ocr_uncertain",
+) -> str:
+    """Применяет локальные доказательства OCR к одному событию; исходные документы и строки OCR неизменны."""
+    if not old_reading or not new_reading or confidence < 0.8:
+        difference.unverified_reason = error
+        difference.reason = "Распознавание неоднозначно. Требуется проверка"
+        return "unverified"
+    old = next(e for e in result.old.elements if e.id == difference.old_element)
+    new = next(e for e in result.new.elements if e.id == difference.new_element)
+    ocr_groups = (
+        result.ocr_comparison_exclusions
+        if uses_ocr(result.old, old) or uses_ocr(result.new, new)
+        else ()
+    )
+    equal = canonicalize(old_reading, result.comparison_exclusions).text == canonicalize(
+        new_reading, result.comparison_exclusions
+    ).text or ocr_equivalent(old_reading, new_reading, old.text, new.text, ocr_groups)
+    if (
+        not equal
+        and ocr_groups
+        and canonicalize(old_reading, ocr_groups).text == canonicalize(new_reading, ocr_groups).text
+    ):
+        difference.unverified_reason = "conflicting_evidence"
+        difference.reason = "Алфавит символов кода неоднозначен. Требуется проверка"
+        return "unverified"
+    difference.old_ocr, difference.new_ocr = difference.old_text, difference.new_text
+    difference.verified_by, difference.confidence = "ocr_recheck", confidence
+    difference.unverified_reason = ""
+    difference.active = not equal
+    difference.status = "confirmed"
+    difference.reason = (
+        "Совпадение подтверждено повторным распознаванием"
+        if equal
+        else "Различие подтверждено по исходным изображениям и повторному OCR"
+    )
+    if not equal:
+        difference.old_text, difference.new_text = old_reading, new_reading
+    for side, document in (("old", result.old), ("new", result.new)):
+        for element in document.elements:
+            if element.id != getattr(difference, side + "_element"):
+                continue
+            accounted = [
+                getattr(d, side + "_range")
+                for d in result.differences
+                if getattr(d, side + "_element") == element.id
+                and (
+                    d.verified_by == "ocr_recheck"
+                    or is_unverified(d)
+                    and d.category != "unverified_region"
+                )
+                and getattr(d, side + "_range")
+            ]
+            unchecked = [
+                w
+                for w in element.words
+                if (not w.verified or w.confidence < 0.65)
+                and not exclusion_value(w.text, result.comparison_exclusions)
+                and not any(w.end > span[0] and w.start < span[1] for span in accounted)
+            ]
+            if unchecked:
+                warning = next(
+                    (
+                        d
+                        for d in result.differences
+                        if d.category == "unverified_region"
+                        and d.uncertainty_id == difference.uncertainty_id
+                        and d.unverified_reason != "unsupported_property"
+                    ),
+                    None,
+                )
+                if warning:
+                    warning.active = True
+                    warning.unverified_reason = "ocr_uncertain"
+                    warning.reason = "Часть фрагмента ещё не подтверждена повторным OCR"
+            related = [
+                d
+                for d in result.differences
+                if d.active and getattr(d, side + "_element") == element.id
+            ]
+            getattr(result.coverage, side)[element.id] = (
+                "unverified"
+                if any(is_unverified(d) for d in related)
+                else "changed"
+                if related
+                else "unchanged"
+            )
+    result.coverage.resolved_algorithms = max(
+        0, result.coverage.original_unverified - len(uncertainty_ids(result.differences))
+    )
+    return "confirmed_equal" if equal else "confirmed_difference"
 
 
 def _relevant_warning(element, side, old, new, matches) -> bool:
@@ -509,6 +652,15 @@ def _group_uncertainties(differences, matches) -> None:
                 "missing_geometry"
                 if (difference.old_element and not difference.old_regions)
                 or (difference.new_element and not difference.new_regions)
+                else "ocr_uncertain"
+                if any(
+                    (side, getattr(difference, side + "_element")) in owners
+                    for side in ("old", "new")
+                )
+                and difference.category != "ambiguous_match"
+                else "unreadable_image"
+                if "не распознал" in difference.reason
+                or "не имеет проверенного текста" in difference.reason
                 else "mapping_not_found"
             )
         roots = sorted(

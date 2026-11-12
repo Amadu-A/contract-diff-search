@@ -61,6 +61,7 @@ def test_unverified_filters_include_ambiguous_matches_without_design_changes(
     page.locator("[data-start]").click()
     expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
     expect(page.locator('[data-stat="unverified"]')).to_have_text("3")
+
     expect(page.locator("[data-warning]")).to_be_visible()
     page.locator("[data-filter-toggle]").click()
     page.locator("[data-category-filter]").select_option("unverified_region")
@@ -75,6 +76,23 @@ def test_unverified_filters_include_ambiguous_matches_without_design_changes(
     expect(page.locator("[data-differences] [data-index]")).to_have_count(1)
     expect(page.locator('[data-stat="unverified"]')).to_have_text("3")
 
+    report = page.locator("[data-export-report]")
+    for show in (False, True, False):
+        page.locator("[data-show-unverified-toggle]").set_checked(show)
+        expect(report).to_have_attribute(
+            "href", __import__("re").compile(rf"show_unverified={str(show).lower()}$")
+        )
+        with page.expect_download() as downloaded:
+            report.click()
+        output = tmp_path / f"visibility-{show}.pdf"
+        downloaded.value.save_as(output)
+        text = "".join(p.extract_text() for p in PdfReader(output).pages)
+        assert ("Товар" in text) == show
+        assert "70%" in text and "50%" in text
+        expect(page.locator('[data-stat="unverified"]')).to_have_text("3")
+    page.locator("[data-show-unverified]").click()
+    expect(report).to_have_attribute("href", __import__("re").compile(r"show_unverified=true$"))
+
 
 def test_report_button_alignment_download_and_reset(live_server, browser_page, tmp_path):
     """Одна новая кнопка стоит под списком на уровне PDF, скачивает отчёт и очищается при сбросе."""
@@ -85,12 +103,14 @@ def test_report_button_alignment_download_and_reset(live_server, browser_page, t
     page.goto(url)
     button = page.locator("[data-export-report]")
     expect(button).not_to_have_attribute("href")
+    page.locator("[data-show-unverified-toggle]").uncheck()
     for side, amount in (("old", 70), ("new", 50)):
         path = pdf(tmp_path / f"{side}.pdf", [f"2.2. Advance payment is {amount}%."])
         page.locator(f"[data-upload={side}] [data-file-input]").set_input_files(str(path))
     page.locator("[data-start]").click()
     expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
     expect(button).to_contain_text("Скачать отчёт")
+    expect(button).to_have_attribute("href", __import__("re").compile(r"show_unverified=false$"))
     report_box = button.bounding_box()
     pdf_box = page.locator("[data-viewer=old] [data-export-pdf]").bounding_box()
     assert report_box["x"] < pdf_box["x"]
@@ -247,6 +267,10 @@ def test_external_bot_link_opens_ready_read_only_result(live_server, browser_pag
         assert len(PdfReader(path).pages) == 1
     browser_page.reload()
     expect(browser_page.locator('[data-stat="total"]')).to_have_text("1")
+    browser_page.locator("[data-show-unverified-toggle]").uncheck()
+    expect(browser_page.locator("[data-export-report]")).to_have_attribute(
+        "href", __import__("re").compile(r"show_unverified=false$")
+    )
     with browser_page.expect_download() as downloaded:
         browser_page.locator("[data-export-report]").click()
     path = tmp_path / "telegram-report.pdf"

@@ -47,7 +47,7 @@ export class Results {
     await this.load(false, quiet);
   }
 
-  /** Скрывает только предупреждения и синхронизирует обе панели и скачивание. */
+  /** Скрывает предупреждения в обеих панелях и скачиваниях, включая отчёт; статусы не меняет. */
   async setVisibility(value) {
     this.showUnverified = value;
     this.viewers.forEach(viewer => viewer.setVisibility(value));
@@ -55,7 +55,11 @@ export class Results {
       if (document.querySelector('[data-status-filter]').value === 'unverified') document.querySelector('[data-status-filter]').value = '';
       if (['unverified_region','ambiguous_match'].includes(document.querySelector('[data-category-filter]').value)) document.querySelector('[data-category-filter]').value = '';
     }
-    if (this.job) await this.load();
+    if (this.job) {
+      const report = document.querySelector('[data-export-report]');
+      if (report.hasAttribute('href')) report.href = jobUrl(this.job, `/report?show_unverified=${value}`);
+      await this.load();
+    }
   }
 
   /** Загружает порцию отфильтрованных записей; сброс отбрасывает запоздалый ответ. */
@@ -120,7 +124,7 @@ export class Results {
     document.querySelector('[data-detail-position]').textContent = `${index + 1}/${this.items.length}`;
     document.querySelector('[data-detail-meta]').textContent = `Наша: ${item.old_regions[0]?.page || 'нет привязки'} · Контрагент: ${item.new_regions[0]?.page || 'нет привязки'}`;
     document.querySelector('[data-detail-category]').textContent = categoryLabel(item.category);
-    const causes = {unreadable_image:'Изображение не удалось прочитать',mapping_not_found:'Соответствие фрагментов не установлено',partial_coverage:'Проверена только часть области',unsupported_property:'Свойство невозможно проверить по изображению',model_error:'Ошибка запроса к модели',conflicting_evidence:'Противоречивые результаты проверки',missing_geometry:'Нет надёжной геометрической привязки'};
+    const causes = {ocr_uncertain:'Распознавание неоднозначно. Требуется проверка',unreadable_image:'Изображение не удалось прочитать',mapping_not_found:'Соответствие фрагментов не установлено',partial_coverage:'Проверена только часть области',unsupported_property:'Свойство невозможно проверить по изображению',model_error:'Ошибка запроса к модели',conflicting_evidence:'Противоречивые результаты проверки',missing_geometry:'Нет надёжной геометрической привязки'};
     document.querySelector('[data-detail-reason]').textContent = (item.source === 'ai' ? `${item.status === 'confirmed' ? 'Подтверждено ИИ по исходным документам' : 'Обнаружено ИИ, требует проверки'}. ` : '') + item.reason + (item.unverified_reason ? `. ${causes[item.unverified_reason] || item.unverified_reason}` : '');
     document.querySelector('[data-detail-old]').textContent = item.old_text || 'Фрагмент отсутствует';
     document.querySelector('[data-detail-new]').textContent = item.new_text || 'Фрагмент отсутствует';
@@ -130,7 +134,7 @@ export class Results {
       if (!image.hidden) image.src = jobUrl(this.job, `/crop/${side}/${encodeURIComponent(item.id)}`);
       else image.removeAttribute('src');
     }
-    document.querySelector('[data-detail-source]').textContent = item.source === 'ai' ? `Источник: ИИ — ${item.verified_by === 'ai_visual' ? 'визуальная проверка исходных документов' : item.status === 'confirmed' ? 'проверка с независимым извлечением' : 'неподтверждённое замечание'}` : item.verified_by ? 'Источник: алгоритмы; перепроверено ИИ' : 'Источник: детерминированное сравнение';
+    document.querySelector('[data-detail-source]').textContent = item.source === 'ai' ? `Источник: ИИ — ${item.verified_by === 'ai_visual' ? 'визуальная проверка исходных документов' : item.status === 'confirmed' ? 'проверка с независимым извлечением' : 'неподтверждённое замечание'}` : item.verified_by === 'ocr_recheck' ? 'Источник: алгоритмы; подтверждено повторным OCR' : item.verified_by ? 'Источник: алгоритмы; перепроверено ИИ' : 'Источник: детерминированное сравнение';
     document.querySelector('[data-diff-prev]').disabled = index === 0;
     document.querySelector('[data-diff-next]').disabled = index === this.items.length - 1;
     for (const button of document.querySelectorAll('[data-index]')) button.setAttribute('aria-current', String(Number(button.dataset.index) === index));

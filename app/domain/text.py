@@ -122,6 +122,40 @@ def excluded_pair(old: str, new: str, a, b, groups: EquivalenceGroups) -> bool:
     )
 
 
+def ocr_equivalent(
+    old: str, new: str, old_context: str, new_context: str, groups: EquivalenceGroups
+) -> bool:
+    """Разрешает омоглифы только в русском текстовом контексте; коды и числовые значения защищены."""
+    if not groups or not old or not new or old == new:
+        return False
+    if not old.isalpha() or not new.isalpha():
+        return False
+    for text, value in ((old_context, old), (new_context, new)):
+        if text.count(value) != 1:
+            return False
+        start = text.index(value)
+        end = start + len(value)
+        # Составной код и буквы рядом с цифрой/разделителем не становятся обычным русским словом.
+        if (
+            start
+            and (text[start - 1].isalnum() or text[start - 1] in "/_-")
+            or end < len(text)
+            and (text[end].isalnum() or text[end] in "/_-")
+        ):
+            return False
+        surrounding = text[max(0, start - 100) : start] + " " + text[end : end + 100]
+        if re.search(
+            r"артикул|идентификатор|\bкод\b|\bмодель\b|\bинн\b|\bкпп\b|\bогрн\b|сч[её]т|iban|swift|серийн",
+            surrounding,
+            re.IGNORECASE,
+        ):
+            return False
+        russian = re.findall(r"[а-яё]{3,}", surrounding, re.IGNORECASE)
+        if len(russian) < 2:
+            return False
+    return canonicalize(old, groups).text == canonicalize(new, groups).text
+
+
 def shingles(text: str, size: int = 3) -> set[tuple[str, ...]]:
     """Строит словесные n-граммы для ограниченного поиска частичных соответствий."""
     words = tuple(t[0].casefold() for t in tokens(content(text)))

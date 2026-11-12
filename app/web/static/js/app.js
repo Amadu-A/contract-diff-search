@@ -69,8 +69,6 @@ document.querySelector('[data-show-unverified-toggle]').addEventListener('change
 async function displayResult(job, run, quiet = false) {
   const summary = await apiRequest(jobUrl(job.id, '/result'));
   if (run !== generation) return;
-  reportDownload.href = jobUrl(job.id, '/report');
-  reportDownload.removeAttribute('aria-disabled');
   if (displayedJob !== job.id) {
     await Promise.all(viewers.map(viewer => viewer.setDocument(job.id, summary.documents[viewer.side], summary.exports[viewer.side])));
     displayedJob = job.id;
@@ -79,6 +77,9 @@ async function displayResult(job, run, quiet = false) {
     await Promise.all(viewers.map(viewer => viewer.refreshRegions()));
   }
   await results.setResult(job.id, summary, quiet);
+  if (run !== generation) return;
+  reportDownload.href = jobUrl(job.id, `/report?show_unverified=${results.showUnverified}`);
+  reportDownload.removeAttribute('aria-disabled');
   aiProgress.update(job, summary.ai_progress, summary.verification_metrics);
   document.querySelector('[data-delete]').hidden = readOnly;
   return summary;

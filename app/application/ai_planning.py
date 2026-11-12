@@ -296,6 +296,8 @@ def unverified_plan(
         elif b and not a:
             a = candidates(b, result.old)
         kind = _kind(a + b)
+        if any(d.unverified_reason in {"ocr_uncertain", "unreadable_image"} for d in differences):
+            kind = "ocr"
         missing = any(
             (d.old_element and not d.old_regions) or (d.new_element and not d.new_regions)
             for d in differences

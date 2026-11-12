@@ -29,6 +29,10 @@ class FakeExtractor:
         """Синтетические неподписанные модели не запускают особый режим."""
         return False
 
+    def recheck(self, result, checkpoint):
+        """Оставляет синтетические модели без выдуманных визуальных доказательств."""
+        checkpoint("Адресная проверка OCR")
+
     def extract(self, path, name, output, visual_only, checkpoint):
         """Вызывает реальную проверку отмены и выбирает модель по стороне."""
         checkpoint("Тестовое извлечение")

@@ -8,14 +8,17 @@ from app.runtime import configure_native_threads
 from app.settings import Settings
 
 
-def load_exclusions(settings: Settings) -> EquivalenceGroups:
-    """Читает UTF-8-группы; ошибочная строка или пересечение групп останавливает запуск с пояснением."""
+def load_exclusions(settings: Settings, kind: str = "text") -> EquivalenceGroups:
+    """Читает обычные либо OCR-группы; проверяет весь файл и не смешивает разные области применения."""
     path = settings.comparison_exclusions_file
-    groups, seen = [], set()
+    groups, seen = {"text": [], "ocr": []}, {"text": set(), "ocr": set()}
     for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
         line = line.strip()
         if not line:
             continue
+        scope = "ocr" if line.startswith("ocr:") else "text"
+        if scope == "ocr":
+            line = line[4:].strip()
         group = tuple(normalize(value.strip()).text for value in line[1:-1].split(","))
         if (
             not line.startswith("[")
@@ -23,15 +26,17 @@ def load_exclusions(settings: Settings) -> EquivalenceGroups:
             or len(group) < 2
             or any(not value or "[" in value or "]" in value for value in group)
             or len(set(group)) != len(group)
-            or seen.intersection(group)
+            or seen[scope].intersection(group)
+            or scope == "ocr"
+            and any(len(value) != 1 or not value.isalpha() for value in group)
         ):
             raise ValueError(
-                f"{path}: строка {number}: ожидается группа [значение, значение]; "
-                "значения должны быть непустыми и не повторяться внутри или между группами"
+                f"{path}: строка {number}: ожидается группа [значение, значение] либо ocr: [символ, символ]; "
+                "значения должны быть непустыми и не повторяться внутри или между группами одного типа"
             )
-        groups.append(group)
-        seen.update(group)
-    return tuple(groups)
+        groups[scope].append(group)
+        seen[scope].update(group)
+    return tuple(groups[kind])
 
 
 def build_service(settings: Settings) -> ComparisonService:
@@ -77,6 +82,7 @@ def build_service(settings: Settings) -> ComparisonService:
             settings.retention_seconds,
             settings.job_timeout_seconds,
             exclusions,
+            load_exclusions(settings, "ocr"),
         ),
         ImageComparer(),
     )

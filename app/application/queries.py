@@ -9,11 +9,11 @@ from app.domain.models import TERMINAL, Difference, JobStatus
 from app.domain.visibility import is_unverified, visible
 
 
-def comparison_report(data: dict, job) -> dict:
-    """Готовит уникальные факты отчёта без оформления и структуры таблиц; анализ не перезапускает."""
+def comparison_report(data: dict, job, show_unverified: bool = True) -> dict:
+    """Готовит факты отчёта с учётом видимости, без оформления и структуры таблиц; статусы не меняет."""
     unique = {}
     for item in data["differences"]:
-        if not item.get("active", True) or item["category"] in {
+        if not visible(item, show_unverified) or item["category"] in {
             "formatting_changed",
             "table_structure_changed",
         }:

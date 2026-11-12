@@ -81,6 +81,27 @@ class TesseractOCR:
         """Сохраняет языки, команду и порог уверенности из валидированных settings."""
         self.settings = settings
 
+    @timed("ocr_fragment_recheck")
+    def recheck(
+        self, image: Image.Image, directory: Path, checkpoint: Callable[[str], None], language: str
+    ) -> list[list[dict]]:
+        """Независимо читает увеличенный контекст как строку и блок; не исправляет исходный OCR."""
+        directory.mkdir(parents=True, exist_ok=True)
+        prepared, angle = prepare_image(image)
+        try:
+            path = directory / "context.png"
+            prepared.save(path)
+            readings = []
+            for psm in (7, 6):
+                checkpoint("Адресная повторная проверка OCR")
+                rows = self._read(path, directory / f"repeat-{psm}", psm, checkpoint, language)
+                for row in rows:
+                    row["box"] = original_box(row["box"], angle, prepared.width, prepared.height)
+                readings.append(rows)
+            return readings
+        finally:
+            prepared.close()
+
     def _read(
         self,
         image: Path,

@@ -216,6 +216,107 @@ def test_docx_and_scanned_pdf_apply_equivalence_before_ai_and_export(settings, e
     assert word.read_bytes() == source_bytes and scanned.read_bytes() == scan_bytes
 
 
+@pytest.mark.parametrize("visible_word", ["не", "т"])
+def test_short_ocr_difference_is_rechecked_on_real_raster_and_exported(
+    settings, extractor, tmp_path, visible_word
+):
+    """Настоящее перечитывание снимает ложное OCR-отличие либо даёт серую редактируемую Word-разметку."""
+    from dataclasses import asdict, replace
+    from zipfile import ZipFile
+
+    from app.domain.comparison import statistics
+
+    if not shutil.which(settings.soffice_command) or not shutil.which(settings.tesseract_command):
+        pytest.skip("Требуются LibreOffice и Tesseract")
+    original = docx(tmp_path / "old.docx", ["10.2. Платёж по причинам не зависит от сторон."])
+    native = pdf(
+        tmp_path / "native.pdf", [f"10.2. Платёж по причинам {visible_word} зависит от сторон."]
+    )
+    scanned = tmp_path / "scan.pdf"
+    with render_page(native, 1, 3) as image:
+        drawing = canvas.Canvas(str(scanned), pagesize=(595, 842))
+        drawing.drawImage(ImageReader(image), 0, 0, 595, 842)
+        drawing.showPage()
+        drawing.save()
+    old = extractor.extract(original, "old.docx", tmp_path / "old", False, checkpoint)
+    new = extractor.extract(scanned, "scan.pdf", tmp_path / "new", False, checkpoint)
+    if visible_word == "не":
+        # Воспроизводим первичную ошибку OCR; проверяемый растр и его геометрия остаются настоящими.
+        element = next(e for e in new.elements if "причинам не" in e.text)
+        word = next(w for w in element.words if w.text == "не")
+        element.text = element.text[: word.start] + "т" + element.text[word.end :]
+        element.words = [
+            replace(w, text="т", end=w.start + 1)
+            if w is word
+            else replace(w, start=w.start - 1, end=w.end - 1)
+            if w.start >= word.end
+            else w
+            for w in element.words
+        ]
+    result = compare(old, new)
+    document_snapshot = asdict(old), asdict(new)
+    extractor.recheck(result, checkpoint)
+    assert (asdict(old), asdict(new)) == document_snapshot
+    assert statistics(result.differences)["unverified"] == 0
+    assert statistics(result.differences)["total"] == (1 if visible_word == "т" else 0)
+    assert any(d.verified_by == "ocr_recheck" for d in result.differences)
+    prior = [asdict(d) for d in result.differences]
+    extractor.recheck(result, checkpoint)
+    assert [asdict(d) for d in result.differences] == prior
+    artifacts = DocumentExporter(LibreOffice(settings)).export(result, tmp_path, checkpoint)
+    word = next(a for a in artifacts["old"] if a.format == "docx")
+    assert word.path, word.reason
+    with ZipFile(word.path) as package:
+        xml = package.read("word/document.xml")
+        assert (b"D4D8DE" in xml) == (visible_word == "т")
+    assert all(a.path for side in artifacts.values() for a in side if a.format == "pdf")
+
+
+@pytest.mark.real
+def test_real_contract_ocr_targets_1_2_and_10_2(settings, extractor, tmp_path):
+    """Проверяет реальные договоры и исходные изображения двух проблемных пунктов без обращения к VLM."""
+    import hashlib
+    import json
+    from dataclasses import asdict
+
+    from app.bootstrap import load_exclusions
+    from app.settings import ROOT
+
+    source = next((ROOT / "examples").glob("*.docx"), None)
+    scanned = next((ROOT / "examples").glob("*.pdf"), None)
+    if not source or not scanned:
+        pytest.skip("Реальные договоры отсутствуют в examples")
+    hashes = [hashlib.sha256(p.read_bytes()).hexdigest() for p in (source, scanned)]
+    old = extractor.extract(source, source.name, tmp_path / "old", False, checkpoint)
+    new = extractor.extract(scanned, scanned.name, tmp_path / "new", False, checkpoint)
+    result = compare(
+        old,
+        new,
+        exclusions=load_exclusions(settings),
+        ocr_exclusions=load_exclusions(settings, "ocr"),
+    )
+    extractor.recheck(result, checkpoint)
+    (tmp_path / "result.json").write_text(
+        json.dumps(asdict(result), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    assert not any(
+        d.active and d.old_section == "1.2" and (d.old_text, d.new_text) == ("ОКС", "OKC")
+        for d in result.differences
+    )
+    assert any(
+        d.active
+        and d.status == "confirmed"
+        and d.old_section == "10.2"
+        and (d.old_text, d.new_text) == ("не", "т")
+        for d in result.differences
+    )
+    assert any(
+        d.active and d.status == "confirmed" and (d.old_text, d.new_text) == ("70%", "50%")
+        for d in result.differences
+    )
+    assert [hashlib.sha256(p.read_bytes()).hexdigest() for p in (source, scanned)] == hashes
+
+
 def test_phash_ssim_detect_small_local_edit():
     """Общий perceptual hash не скрывает маленькую изменённую цифру на рисунке."""
     a = Image.new("RGB", (200, 100), "white")

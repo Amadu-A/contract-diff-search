@@ -18,6 +18,7 @@ from pypdf import PdfReader, PdfWriter, Transformation
 from pypdf.generic import NameObject
 
 from app.domain.algorithms import lcs
+from app.domain.comparison import resolve_ocr
 from app.domain.models import (
     DocumentElement,
     DocumentError,
@@ -27,7 +28,8 @@ from app.domain.models import (
     VisualRegion,
     Word,
 )
-from app.domain.text import SECTION, normalize, tokens
+from app.domain.text import SECTION, canonicalize, normalize, ocr_equivalent, tokens
+from app.domain.visibility import is_unverified
 from app.infrastructure.graphics import extract_blue_graphics, extract_unknown_graphics, fingerprint
 from app.infrastructure.ocr import TesseractOCR
 from app.infrastructure.word import LibreOffice, prepare_docx, read_docx
@@ -342,6 +344,180 @@ class PdfDocumentExtractor:
     def is_signed(self, path: Path) -> bool:
         """Делегирует структурную проверку встроенной подписи PDF."""
         return has_signature(path)
+
+    @timed("comparison_ocr_recheck")
+    def recheck(self, result, checkpoint):
+        """Перечитывает только локальные OCR-различия до экспорта и необязательного VLM-прохода."""
+        cache = {}
+        try:
+            for difference in result.differences:
+                if (
+                    not is_unverified(difference)
+                    or difference.unverified_reason != "ocr_uncertain"
+                    or not difference.old_range
+                    or not difference.new_range
+                ):
+                    continue
+                if not any(
+                    difference.old_element in match.old and difference.new_element in match.new
+                    for match in result.matches
+                ):
+                    continue
+                if (
+                    max(len(difference.old_text), len(difference.new_text)) > 3
+                    and difference.old_range[1] - difference.old_range[0] > 2
+                    and difference.new_range[1] - difference.new_range[0] > 2
+                ):
+                    continue
+                readings = []
+                for side in ("old", "new"):
+                    document = getattr(result, side)
+                    element = next(
+                        e
+                        for e in document.elements
+                        if e.id == getattr(difference, side + "_element")
+                    )
+                    span = getattr(difference, side + "_range")
+                    value = getattr(difference, side + "_text")
+                    try:
+                        readings.append(
+                            self._fragment_reading(
+                                document,
+                                element,
+                                span,
+                                value,
+                                result,
+                                difference.id + "-" + side,
+                                cache,
+                                checkpoint,
+                            )
+                        )
+                    except (DocumentError, OSError, ValueError):
+                        readings.append((None, 0, "ocr_uncertain"))
+                error = next((r[2] for r in readings if r[0] is None), "ocr_uncertain")
+                resolve_ocr(
+                    result,
+                    difference,
+                    readings[0][0],
+                    readings[1][0],
+                    confidence=min(r[1] for r in readings),
+                    error=error,
+                )
+        finally:
+            for image in cache.values():
+                image.close()
+
+    def _fragment_reading(
+        self, document, element, span, value, result, identifier, cache, checkpoint
+    ):
+        """Требует геометрии, двух устойчивых чтений и соседних опор; значение другой редакции не используется."""
+        selected = [w for w in element.words if w.end > span[0] and w.start < span[1]]
+        if not selected or len({w.region.page for w in selected}) != 1:
+            return None, 0, "missing_geometry"
+        number = selected[0].region.page
+        page = next(p for p in document.pages if p.number == number)
+        if (
+            page.mode == "text"
+            and not document.visual_only
+            and all(w.verified and w.confidence >= 0.8 for w in selected)
+        ):
+            return value, min(w.confidence for w in selected), ""
+        x0, y0 = min(w.region.x0 for w in selected), min(w.region.y0 for w in selected)
+        x1, y1 = max(w.region.x1 for w in selected), max(w.region.y1 for w in selected)
+        line = sorted(
+            [
+                w
+                for w in element.words
+                if w.region.page == number
+                and min(w.region.y1, y1) - max(w.region.y0, y0)
+                >= min(w.region.y1 - w.region.y0, y1 - y0) / 2
+            ],
+            key=lambda w: w.region.x0,
+        )
+        own = [i for i, w in enumerate(line) if w in selected]
+        if not own:
+            return None, 0, "missing_geometry"
+        context = line[max(0, min(own) - 3) : max(own) + 4]
+        anchors = [
+            w
+            for w in context
+            if w not in selected and w.verified and w.confidence >= 0.65 and len(w.text) >= 2
+        ]
+        if not anchors:
+            return None, 0, "ocr_uncertain"
+        key = document.pdf, number
+        if key not in cache:
+            if len(cache) >= 2:
+                cache.pop(next(iter(cache))).close()
+            scale = min(
+                max(4.5, self.settings.ocr_dpi / 48),
+                (self.settings.max_page_pixels / (page.width * page.height)) ** 0.5,
+            )
+            cache[key] = render_page(
+                Path(document.pdf), number, scale, self.settings.max_page_pixels
+            )
+        image = cache[key]
+        scale_x, scale_y = image.width / page.width, image.height / page.height
+        left = max(0, int((min(w.region.x0 for w in context) - 3) * scale_x))
+        top = max(0, int((min(w.region.y0 for w in context) - 3) * scale_y))
+        right = min(image.width, int((max(w.region.x1 for w in context) + 3) * scale_x))
+        bottom = min(image.height, int((max(w.region.y1 for w in context) + 3) * scale_y))
+        word_start, word_end = min(w.start for w in selected), max(w.end for w in selected)
+        start, end = span
+        found = [
+            m
+            for m in re.finditer(re.escape(value), element.text[word_start:word_end])
+            if word_start + m.start() <= start < word_start + m.end()
+        ]
+        if len(found) == 1:
+            start, end = word_start + found[0].start(), word_start + found[0].end()
+        prefix = element.text[word_start:start].replace(" ", "")
+        suffix = element.text[end:word_end].replace(" ", "")
+        language = (
+            "rus"
+            if len(re.findall(r"[А-Яа-яЁё]", element.text)) > len(element.text) * 0.15
+            else self.settings.ocr_language
+        )
+        with image.crop((left, top, right, bottom)) as crop:
+            passes = self.ocr.recheck(
+                crop, Path(document.pdf).parent / "ocr-recheck" / identifier, checkpoint, language
+            )
+        values, qualities = [], []
+        for rows in passes:
+            target = [
+                r
+                for r in rows
+                if min((left + r["box"][2]) / scale_x, x1) - max((left + r["box"][0]) / scale_x, x0)
+                >= min((r["box"][2] - r["box"][0]) / scale_x, x1 - x0) / 4
+                and min((top + r["box"][3]) / scale_y, y1) > max((top + r["box"][1]) / scale_y, y0)
+            ]
+            if not target:
+                return None, 0, "unreadable_image" if not rows else "ocr_uncertain"
+            literal = "".join(r["text"] for r in sorted(target, key=lambda r: r["box"][0]))
+            surrounding = "".join(r["text"] for r in rows)
+            if sum(w.text.replace(" ", "") in surrounding for w in anchors) < min(2, len(anchors)):
+                return None, 0, "conflicting_evidence"
+            if (
+                not literal.startswith(prefix)
+                or not literal.endswith(suffix)
+                or len(literal) <= len(prefix) + len(suffix)
+            ):
+                return None, 0, "conflicting_evidence"
+            values.append(literal[len(prefix) : len(literal) - len(suffix) if suffix else None])
+            qualities.append(min(r["confidence"] for r in target))
+        if len(values) != 2 or min(qualities) < max(0.8, self.settings.ocr_min_confidence):
+            return None, 0, "ocr_uncertain"
+        if canonicalize(values[0], result.comparison_exclusions).text != canonicalize(
+            values[1], result.comparison_exclusions
+        ).text and not ocr_equivalent(
+            values[0],
+            values[1],
+            element.text[:start] + values[0] + element.text[end:],
+            element.text[:start] + values[1] + element.text[end:],
+            result.ocr_comparison_exclusions,
+        ):
+            return None, 0, "conflicting_evidence"
+        return values[0], min(qualities), ""
 
     @timed("document_extract")
     def extract(

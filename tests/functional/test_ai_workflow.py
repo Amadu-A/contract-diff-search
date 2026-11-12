@@ -17,6 +17,60 @@ from tests.unit.test_ai_review import Reviewer, uncertain_result, visual_reply
 pytest_plugins = ("tests.functional.test_lifecycle",)
 
 
+@pytest.mark.parametrize("ai_enabled", [False, True])
+def test_local_ocr_runs_before_optional_vlm_and_resolves_short_changes(
+    client, service, tmp_path, ai_enabled
+):
+    """Повторное OCR обязательно при короткой неопределённости; VLM вызывается только выбранным режимом."""
+    from app.domain.comparison import resolve_ocr
+    from tests.fakes import FakeExtractor
+    from tests.regression.test_ocr_recheck import short_result
+
+    initial = short_result()
+    calls = []
+
+    class Extractor(FakeExtractor):
+        """Передаёт сценарий локальной проверки через действующий порт извлечения."""
+
+        def recheck(self, result, checkpoint):
+            """Разрешает локально либо оставляет цель для независимо включённой VLM."""
+            calls.append("ocr")
+            if not ai_enabled:
+                resolve_ocr(result, result.differences[0], "не", "т", confidence=0.95)
+
+    class Visual:
+        """Контролирует отсутствие принудительных запросов к модели."""
+
+        def review(self, unit, old, new, attempt):
+            """Возвращает проверяемое визуальное доказательство только при явном выборе ИИ."""
+            assert ai_enabled
+            calls.append("vlm")
+            return visual_reply(unit, "text_modified", "не", "т")
+
+    service.extractor = Extractor(initial.old, initial.new)
+    service.verifier = AIReviewCoordinator(Visual(), AILimits())
+    path = pdf(tmp_path / "input-short.pdf", ["Synthetic"])
+    job = client.post(
+        "/api/v1/comparisons",
+        files={
+            side: (side + ".pdf", path.read_bytes(), "application/pdf") for side in ("old", "new")
+        },
+        data={"ai_unverified": str(ai_enabled).lower()},
+    ).json()
+    service.process(job["id"])
+    result = service.storage.restore_result(job["id"])
+    assert calls[0] == "ocr"
+    assert ("vlm" in calls) == ai_enabled
+    assert any(
+        d.active and d.status == "confirmed" and d.old_text == "не" and d.new_text == "т"
+        for d in result.differences
+    )
+    assert (
+        client.get(f"/api/v1/comparisons/{job['id']}/result").json()["statistics"]["unverified"]
+        == 0
+    )
+
+
 def test_accepted_visual_checkpoint_updates_statistics_and_pdf_before_final_word(
     client, service, tmp_path
 ):

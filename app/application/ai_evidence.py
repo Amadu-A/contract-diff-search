@@ -4,9 +4,9 @@
 import hashlib
 from dataclasses import dataclass
 
-from app.domain.comparison import regions
+from app.domain.comparison import regions, uses_ocr
 from app.domain.models import ComparisonResult, Difference, ElementMatch, ReviewUnit, VisualRegion
-from app.domain.text import excluded_pair, normalize
+from app.domain.text import canonicalize, excluded_pair, normalize, ocr_equivalent
 from app.domain.visibility import is_unverified, uncertainty_ids
 
 
@@ -303,6 +303,46 @@ def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
         b = _visual_anchor(
             result, unit, "new", observation.new_value, observation.new_quote, observation.new_ref
         )
+        if (
+            a
+            and b
+            and not observation.category.startswith("graphic_")
+            and observation.old_value
+            and observation.new_value
+        ):
+            old_element = next((e for e in result.old.elements if e.id == a.element), None)
+            new_element = next((e for e in result.new.elements if e.id == b.element), None)
+            if (
+                old_element
+                and new_element
+                and (uses_ocr(result.old, old_element) or uses_ocr(result.new, new_element))
+            ):
+                resolved = any(
+                    not d.active
+                    and d.verified_by == "ocr_recheck"
+                    and d.old_element == a.element
+                    and d.new_element == b.element
+                    and (d.old_ocr, d.new_ocr) == (observation.old_value, observation.new_value)
+                    for d in result.differences
+                )
+                if (
+                    resolved
+                    and result.ocr_comparison_exclusions
+                    and canonicalize(observation.old_value, result.ocr_comparison_exclusions).text
+                    == canonicalize(observation.new_value, result.ocr_comparison_exclusions).text
+                ) or (
+                    a.verified
+                    and b.verified
+                    and any(a.element in m.old and b.element in m.new for m in result.matches)
+                    and ocr_equivalent(
+                        observation.old_value,
+                        observation.new_value,
+                        old_element.text,
+                        new_element.text,
+                        result.ocr_comparison_exclusions,
+                    )
+                ):
+                    continue
         same = observation.category == "unchanged"
         addition = observation.category.endswith("_added")
         deletion = observation.category.endswith("_deleted")

@@ -475,10 +475,12 @@ def create_app(
         return queries.correspondence(read_result(job_id, request, service), side, page)
 
     @app.get("/api/v1/comparisons/{job_id}/report")
-    def report(job_id: UUID, request: Request, service: Service):
-        """Скачивает отчёт с теми же правами владельца/Telegram-сессии и TTL, что исходный результат."""
+    def report(job_id: UUID, request: Request, service: Service, show_unverified: bool = True):
+        """Скачивает отчёт с выбранной видимостью; права владельца/Telegram-сессии и TTL сохраняются."""
         data = read_result(job_id, request, service)
-        projection = queries.comparison_report(data, service.repository.get(str(job_id)))
+        projection = queries.comparison_report(
+            data, service.repository.get(str(job_id)), show_unverified
+        )
         return Response(
             service.exporter.report(projection),
             media_type="application/pdf",

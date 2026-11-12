@@ -49,6 +49,7 @@ class Limits:
     retention: int
     timeout: int
     comparison_exclusions: EquivalenceGroups = ()
+    ocr_comparison_exclusions: EquivalenceGroups = ()
 
 
 def owner_hash(capability: str) -> str:
@@ -369,7 +370,14 @@ class ComparisonService:
                 )
                 checkpoint("Структурное сопоставление и сравнение")
                 scores = self.visual_comparator.measure(old, new) if self.visual_comparator else {}
-                result = compare(old, new, scores, self.limits.comparison_exclusions)
+                result = compare(
+                    old,
+                    new,
+                    scores,
+                    self.limits.comparison_exclusions,
+                    self.limits.ocr_comparison_exclusions,
+                )
+                self.extractor.recheck(result, checkpoint)
                 checkpoint("Сохранение базового результата и экспорта")
                 result.exports = self.exporter.export(result, directory, checkpoint)
                 self.storage.write_result(job_id, result)

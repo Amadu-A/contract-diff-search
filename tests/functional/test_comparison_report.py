@@ -53,6 +53,80 @@ def test_report_uses_saved_result_without_restarting_pipeline(client, service, t
     assert service.extractor.calls == before
 
 
+def test_report_visibility_hides_all_uncertainties_without_changing_saved_result(
+    client, service, tmp_path
+):
+    """Переключатель скрывает OCR, неоднозначности и гипотезы ИИ в отчёте; статусы и сводка задания неизменны."""
+    job_id = report_job(client, service, tmp_path)
+    result = service.storage.restore_result(job_id)
+    result.differences += [
+        Difference(
+            "AI",
+            "text_modified",
+            "Подтверждено ИИ",
+            "ConfirmedBefore",
+            "ConfirmedAfter",
+            source="ai",
+        ),
+        Difference(
+            "U", "unverified_region", "Область", "RegionBefore", "RegionAfter", status="unverified"
+        ),
+        Difference("O", "number_modified", "OCR", "OCRBefore", "OCRAfter", status="unverified"),
+        Difference(
+            "A",
+            "ambiguous_match",
+            "Неоднозначно",
+            "AmbiguousBefore",
+            "AmbiguousAfter",
+            status="ambiguous",
+        ),
+        Difference(
+            "L",
+            "ambiguous_match",
+            "Старый статус",
+            "LegacyBefore",
+            "LegacyAfter",
+            status="confirmed",
+        ),
+        Difference(
+            "H",
+            "text_modified",
+            "Гипотеза ИИ",
+            "HypothesisBefore",
+            "HypothesisAfter",
+            status="needs_review",
+            source="ai",
+        ),
+    ]
+    service.storage.write_result(job_id, result)
+    saved = service.storage.read_result(job_id)
+    base = f"/api/v1/comparisons/{job_id}"
+    summary = client.get(base + "/result").json()
+    assert summary["statistics"]["unverified"] == 5
+    for show in (True, False, True):
+        projection = comparison_report(saved, service.repository.get(job_id), show)
+        assert projection["statistics"]["total"] == 2
+        assert projection["statistics"]["unverified"] == (5 if show else 0)
+        assert projection["statistics"]["ai_needs_review"] == (1 if show else 0)
+        response = client.get(base + "/report", params={"show_unverified": str(show).lower()})
+        assert response.status_code == 200, response.text
+        text = "".join(
+            "".join(page.extract_text().split())
+            for page in PdfReader(io.BytesIO(response.content)).pages
+        )
+        assert (
+            "70%" in text
+            and "50%" in text
+            and "ConfirmedBefore" in text
+            and "ConfirmedAfter" in text
+        )
+        for marker in ("Region", "OCR", "Ambiguous", "Legacy", "Hypothesis"):
+            assert (marker + "Before" in text) == show
+            assert (marker + "After" in text) == show
+    assert service.storage.read_result(job_id) == saved
+    assert client.get(base + "/result").json() == summary
+
+
 @pytest.mark.parametrize("only_excluded", [False, True])
 def test_report_omits_formatting_and_table_structure_for_all_sources_and_statuses(
     client, service, tmp_path, only_excluded
@@ -265,6 +339,13 @@ def test_report_download_from_telegram_read_only_session(settings, service, tmp_
         job_id = response.json()["job_id"]
         service.process(job_id)
         service.exporter = DocumentExporter(None)
+        result = service.storage.restore_result(job_id)
+        result.differences.append(
+            Difference(
+                "U", "unverified_region", "Область", "TelegramUnverified", status="unverified"
+            )
+        )
+        service.storage.write_result(job_id, result)
         link = bot.post(f"{INTEGRATION}/{job_id}/access-link").json()["url"]
     ticket = parse_qs(urlsplit(link).fragment)["ticket"][0]
     before = service.extractor.calls
@@ -276,7 +357,15 @@ def test_report_download_from_telegram_read_only_session(settings, service, tmp_
             headers={"X-Requested-With": "ContractDiff"},
         )
         assert response.status_code == 200, response.text
-        downloaded = viewer.get(f"/api/v1/comparisons/{job_id}/report")
-        assert downloaded.status_code == 200
-        assert "70%" in PdfReader(io.BytesIO(downloaded.content)).pages[0].extract_text()
+        for show in (True, False):
+            downloaded = viewer.get(
+                f"/api/v1/comparisons/{job_id}/report",
+                params={"show_unverified": str(show).lower()},
+            )
+            assert downloaded.status_code == 200
+            text = "".join(
+                page.extract_text() for page in PdfReader(io.BytesIO(downloaded.content)).pages
+            )
+            assert "70%" in text
+            assert ("TelegramUnverified" in text) == show
     assert service.extractor.calls == before

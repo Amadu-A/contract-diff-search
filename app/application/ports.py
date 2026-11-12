@@ -119,6 +119,10 @@ class DocumentExtractor(Protocol):
         """Проверяет объекты криптографической подписи без валидации сертификата."""
         ...
 
+    def recheck(self, result: ComparisonResult, checkpoint: Callable[[str], None]) -> None:
+        """Адресно перечитывает сомнительные OCR-фрагменты, сохраняя исходные строки и реальные статусы."""
+        ...
+
     def extract(
         self,
         path: Path,

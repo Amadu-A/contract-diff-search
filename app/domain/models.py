@@ -332,6 +332,7 @@ class ComparisonResult:
     ai_review: AIReviewState = field(default_factory=AIReviewState)
     exports_current: bool = True
     comparison_exclusions: list[list[str]] = field(default_factory=list)
+    ocr_comparison_exclusions: list[list[str]] = field(default_factory=list)
 
 
 @dataclass

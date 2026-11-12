@@ -24,6 +24,7 @@ from app.domain.text import (
     content,
     excluded_pair,
     exclusion_value,
+    ocr_equivalent,
     shingles,
     similarity,
     tokens,
@@ -31,7 +32,10 @@ from app.domain.text import (
 
 
 def match_elements(
-    old: list[DocumentElement], new: list[DocumentElement], exclusions: EquivalenceGroups = ()
+    old: list[DocumentElement],
+    new: list[DocumentElement],
+    exclusions: EquivalenceGroups = (),
+    ocr_exclusions: EquivalenceGroups = (),
 ) -> tuple[list[ElementMatch], set[str], set[str]]:
     """Сопоставляет структуру, перемещения и дробление; возвращает спорные идентификаторы."""
     a = [comparison_content(e.text, exclusions) for e in old]
@@ -183,6 +187,14 @@ def match_elements(
                 continue
             score = similarity(a[i], b[j])
             same_section = bool(element.section and element.section == other.section)
+            if same_section and ocr_equivalent(
+                content(element.text),
+                content(other.text),
+                " ".join(e.text for e in old[max(0, i - 1) : i + 2]),
+                " ".join(e.text for e in new[max(0, j - 1) : j + 2]),
+                ocr_exclusions,
+            ):
+                score = max(score, 0.9)
             if same_section and 3 <= max(len(a[i]), len(b[j])) <= 64:
                 distance = damerau_levenshtein(a[i], b[j])
                 if distance <= 2:
