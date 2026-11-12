@@ -7,6 +7,7 @@ from dataclasses import replace
 from urllib.parse import parse_qs, urlsplit
 
 import pdfplumber
+import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from pypdf import PdfReader
@@ -50,6 +51,76 @@ def test_report_uses_saved_result_without_restarting_pipeline(client, service, t
         assert "Было (наша" in text and "Стало (версия" in text
         assert "70%" in text and "50%" in text and "Подтверждено" in text
     assert service.extractor.calls == before
+
+
+@pytest.mark.parametrize("only_excluded", [False, True])
+def test_report_omits_formatting_and_table_structure_for_all_sources_and_statuses(
+    client, service, tmp_path, only_excluded
+):
+    """Отчёт и его счётчики исключают два типа; сохранённый результат и остальные изменения доступны."""
+    job_id = report_job(client, service, tmp_path)
+    result = service.storage.restore_result(job_id)
+    result.differences = []
+    for category in ("formatting_changed", "table_structure_changed"):
+        for source in ("deterministic", "ai"):
+            for status in ("confirmed", "unverified", "needs_review"):
+                result.differences.append(
+                    Difference(
+                        f"{category}-{source}-{status}",
+                        category,
+                        "Исключаемое событие",
+                        "ExcludedBeforeMarker",
+                        "ExcludedAfterMarker",
+                        status=status,
+                        source=source,
+                    )
+                )
+    if not only_excluded:
+        result.differences += [
+            Difference("T", "table_modified", "Содержимое ячейки", "70%", "50%"),
+            Difference(
+                "S", "structure_changed", "Структура документа", "BeforeMarker", "AfterMarker"
+            ),
+            Difference(
+                "U",
+                "text_modified",
+                "Непроверенный текст",
+                "UncertainMarker",
+                "ReviewMarker",
+                status="unverified",
+            ),
+        ]
+    service.storage.write_result(job_id, result)
+    saved = service.storage.read_result(job_id)
+    projection = comparison_report(saved, service.repository.get(job_id))
+    assert {item["id"] for item in projection["differences"]} == (
+        set() if only_excluded else {"T", "S", "U"}
+    )
+    assert projection["statistics"]["total"] == (0 if only_excluded else 2)
+    assert projection["statistics"]["unverified"] == (0 if only_excluded else 1)
+
+    base = f"/api/v1/comparisons/{job_id}"
+    response = client.get(base + "/report")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    reader = PdfReader(io.BytesIO(response.content))
+    assert reader.pages
+    text = "".join("".join(page.extract_text().split()) for page in reader.pages)
+    assert "ExcludedBeforeMarker" not in text and "ExcludedAfterMarker" not in text
+    assert "Оформление" not in text and "Структуратаблицы" not in text
+    if not only_excluded:
+        for expected in (
+            "70%",
+            "50%",
+            "BeforeMarker",
+            "AfterMarker",
+            "UncertainMarker",
+            "ReviewMarker",
+        ):
+            assert expected in text
+    for category in ("formatting_changed", "table_structure_changed"):
+        assert client.get(base + "/differences?category=" + category).json()["total"] == 6
+    assert service.storage.read_result(job_id) == saved
 
 
 def test_excluded_inline_changes_have_no_rows_statistics_or_ui_items(client, service, tmp_path):

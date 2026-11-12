@@ -10,10 +10,13 @@ from app.domain.visibility import is_unverified, visible
 
 
 def comparison_report(data: dict, job) -> dict:
-    """Проецирует сохранённые уникальные факты и реальные статусы без запуска анализа."""
+    """Готовит уникальные факты отчёта без оформления и структуры таблиц; анализ не перезапускает."""
     unique = {}
     for item in data["differences"]:
-        if not item.get("active", True):
+        if not item.get("active", True) or item["category"] in {
+            "formatting_changed",
+            "table_structure_changed",
+        }:
             continue
         key = tuple(
             str(item.get(name, ""))
