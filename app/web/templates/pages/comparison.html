@@ -33,8 +33,30 @@
 <aside class="warning" data-warning hidden><span class="warning__icon">⚠</span><strong>Есть непроверенные области</strong><p data-warning-text>Некоторые участки не удалось проверить автоматически. Просмотрите их вручную.</p><button class="button" type="button" data-show-unverified>◉ Показать области</button><button class="button button--icon" type="button" data-dismiss-warning aria-label="Закрыть предупреждение">×</button></aside>
 <section class="workspace" aria-label="Сравнение редакций">
   <aside class="differences" aria-label="Найденные различия">
-    <header class="differences__header"><h2>Найденные различия <span data-list-count>0</span></h2><button class="button button--icon" type="button" data-filter-toggle aria-label="Фильтры">☷</button></header>
-    <form class="differences__filters" data-filters hidden><label>Категория<select data-category-filter><option value="">Все категории</option><option value="number_modified">Числа</option><option value="text_modified">Текст</option><option value="text_added">Добавления</option><option value="text_deleted">Удаления</option><option value="text_moved">Перемещения</option><option value="numbering_changed">Нумерация</option><option value="formatting_changed">Оформление</option><option value="structure_changed">Структура</option><option value="table_structure_changed">Таблицы</option><option value="graphic_added">Добавленная графика</option><option value="graphic_modified">Изменённая графика</option><option value="unverified_region">Непроверенные области</option><option value="ambiguous_match">Неоднозначные</option></select></label><label>Статус<select data-status-filter><option value="">Все статусы</option><option value="confirmed">Подтверждено</option><option value="unverified">Не проверено</option><option value="needs_review">Замечания ИИ</option></select></label></form>
+    <header class="differences__header"><h2>Найденные различия <span data-list-count>0</span></h2><button class="button differences__filter-toggle" type="button" data-filter-toggle aria-label="Фильтры" aria-expanded="false">☷ Фильтры</button></header>
+    <form class="differences__filters" data-filters hidden>
+      <fieldset class="differences__categories"><legend>Категории</legend>
+        <label><input type="checkbox" data-category-filter value="number_modified" checked>Числа</label>
+        <label><input type="checkbox" data-category-filter value="text_modified" checked>Текст</label>
+        <label><input type="checkbox" data-category-filter value="text_added" checked>Добавления</label>
+        <label><input type="checkbox" data-category-filter value="text_deleted" checked>Удаления</label>
+        <label><input type="checkbox" data-category-filter value="table_modified" checked>Содержимое таблиц</label>
+        <label><input type="checkbox" data-category-filter value="text_moved">Перемещения</label>
+        <label><input type="checkbox" data-category-filter value="numbering_changed">Нумерация</label>
+        <label><input type="checkbox" data-category-filter value="structure_changed">Структура</label>
+        <label><input type="checkbox" data-category-filter value="table_structure_changed">Структура таблиц</label>
+        <label><input type="checkbox" data-category-filter value="graphic_added">Добавленная графика</label>
+        <label><input type="checkbox" data-category-filter value="graphic_deleted">Удалённая графика</label>
+        <label><input type="checkbox" data-category-filter value="graphic_modified">Изменённая графика</label>
+        <label><input type="checkbox" data-category-filter value="graphic_moved">Перемещённая графика</label>
+        <label><input type="checkbox" data-category-filter value="unverified_region">Непроверенные области</label>
+        <label><input type="checkbox" data-category-filter value="ambiguous_match">Неоднозначные</label>
+        <label><input type="checkbox" data-category-filter value="ai_contradiction">Противоречия ИИ</label>
+      </fieldset>
+      <button class="button" type="button" data-filter-all>Все категории</button>
+      <label>Статус<select data-status-filter><option value="">Все статусы</option><option value="confirmed">Подтверждено</option><option value="unverified">Не проверено</option><option value="needs_review">Замечания ИИ</option></select></label>
+      <button class="button" type="button" data-filter-reset>Сбросить фильтры</button>
+    </form>
     <ol class="differences__list" data-differences><li class="differences__empty">Различия появятся после анализа документов</li></ol>
     <button class="button differences__more" type="button" data-load-more hidden>Показать ещё</button>
     <footer class="differences__exports"><a class="button" data-export-report aria-disabled="true">⤓ Скачать отчёт</a></footer>

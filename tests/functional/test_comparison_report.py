@@ -369,3 +369,42 @@ def test_report_download_from_telegram_read_only_session(settings, service, tmp_
             assert "70%" in text
             assert ("TelegramUnverified" in text) == show
     assert service.extractor.calls == before
+
+
+def test_multiple_categories_filter_list_and_report_without_mutation(client, service, tmp_path):
+    """Повторяющиеся category объединяются; отчёт считает только выбранные видимые факты."""
+    job_id = report_job(client, service, tmp_path)
+    result = service.storage.restore_result(job_id)
+    result.differences = [
+        Difference("N", "number_modified", "Число", "NumberBefore", "NumberAfter"),
+        Difference("T", "text_modified", "Текст", "TextBefore", "TextAfter", source="ai"),
+        Difference("A", "text_added", "Добавлено", new_text="AddedMarker"),
+        Difference(
+            "U",
+            "text_modified",
+            "Не проверено",
+            "WarningBefore",
+            "WarningAfter",
+            status="unverified",
+        ),
+        Difference("M", "text_moved", "Перемещение", "MovedMarker", "MovedMarker"),
+    ]
+    service.storage.write_result(job_id, result)
+    saved = service.storage.read_result(job_id)
+    query = "?category=number_modified&category=text_modified&show_unverified=false"
+    base = f"/api/v1/comparisons/{job_id}"
+    response = client.get(base + "/differences" + query)
+    assert {d["id"] for d in response.json()["items"]} == {"N", "T"}
+    projection = comparison_report(
+        saved, service.repository.get(job_id), False, ["number_modified", "text_modified"]
+    )
+    assert projection["statistics"]["total"] == 2
+    assert projection["statistics"]["unverified"] == 0
+    response = client.get(base + "/report" + query)
+    text = "".join(p.extract_text() for p in PdfReader(io.BytesIO(response.content)).pages)
+    for marker in ("NumberBefore", "TextBefore", "NumberAfter", "TextAfter"):
+        assert marker in text
+    for marker in ("AddedMarker", "WarningBefore", "MovedMarker"):
+        assert marker not in text
+    assert service.storage.read_result(job_id) == saved
+    assert client.get(base + "/differences?category=number_modified").json()["total"] == 1

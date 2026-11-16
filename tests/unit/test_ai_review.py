@@ -713,3 +713,24 @@ def test_internal_hyperlink_and_field_code_are_explicit_nonvisual_properties(tmp
         not ({d.uncertainty_id for d in properties} & set(unit.targets))
         for unit in unverified_plan(result, 3600)
     )
+
+
+def test_old_formatting_observation_is_ignored_before_merge():
+    """Повтор старого ответа ИИ не восстанавливает отменённую категорию в новом результате."""
+    result = uncertain_result(1)
+    unit = unverified_plan(result, 3600)[0]
+    reply = visual_reply(unit, "formatting_changed", "Условия", "Условия")
+    before = asdict(result)
+    merge_reply(result, unit, reply)
+    assert not any(d.category == "formatting_changed" for d in result.differences)
+    assert [asdict(d) for d in result.differences] == before["differences"]
+
+
+def test_ai_cannot_create_edit_between_different_tokens_of_identical_full_content():
+    """Одинаковое полное содержание сильнее ложного сопоставления разных чисел внутри него."""
+    result = compare(
+        version(["1. Срок 30 дней, цена 40 рублей."]), version(["1. Срок 30 дней, цена 40 рублей."])
+    )
+    unit = next(u for u in full_plan(result, 3600) if u.kind == "page")
+    merge_reply(result, unit, visual_reply(unit, "number_modified", "30", "40"))
+    assert not result.differences

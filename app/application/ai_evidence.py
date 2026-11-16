@@ -6,7 +6,13 @@ from dataclasses import dataclass
 
 from app.domain.comparison import regions, uses_ocr
 from app.domain.models import ComparisonResult, Difference, ElementMatch, ReviewUnit, VisualRegion
-from app.domain.text import canonicalize, excluded_pair, normalize, ocr_equivalent
+from app.domain.text import (
+    canonicalize,
+    comparison_content,
+    excluded_pair,
+    normalize,
+    ocr_equivalent,
+)
 from app.domain.visibility import is_unverified, uncertainty_ids
 
 
@@ -283,6 +289,8 @@ def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
         _record_contradiction(result, unit)
     _resolve_refined_same(result, unit, reply)
     for observation in [*reply.findings, *reply.evidence]:
+        if observation.category == "formatting_changed":
+            continue
         # Это фильтрация замечания, а не доказательство соответствия или разрешение другой области.
         if observation.category in {
             "text_modified",
@@ -312,6 +320,17 @@ def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
         ):
             old_element = next((e for e in result.old.elements if e.id == a.element), None)
             new_element = next((e for e in result.new.elements if e.id == b.element), None)
+            if (
+                observation.category in {"text_modified", "number_modified", "table_modified"}
+                and a.verified
+                and b.verified
+                and old_element
+                and new_element
+                and comparison_content(old_element.text, result.comparison_exclusions)
+                == comparison_content(new_element.text, result.comparison_exclusions)
+                and any(m.old == [a.element] and m.new == [b.element] for m in result.matches)
+            ):
+                continue
             if (
                 old_element
                 and new_element
@@ -391,7 +410,6 @@ def merge_reply(result: ComparisonResult, unit: ReviewUnit, reply) -> None:
                 and bool(observation.old_value)
             )
         elif observation.category in {
-            "formatting_changed",
             "text_moved",
             "table_structure_changed",
             "structure_changed",

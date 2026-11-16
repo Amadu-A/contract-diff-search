@@ -151,11 +151,25 @@ class FileStorage:
         path = self.directory(job_id)
         temporary = path / "result.tmp"
         temporary.write_text(json.dumps(asdict(result), ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path / "result.json")
+        for attempt in range(8):
+            try:
+                temporary.replace(path / "result.json")
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
 
     def read_result(self, job_id: str) -> dict:
         """Читает только результат указанного задания; доступ проверяет use-case."""
-        return json.loads((self.directory(job_id) / "result.json").read_text(encoding="utf-8"))
+        path = self.directory(job_id) / "result.json"
+        for attempt in range(8):
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
 
     def has_result(self, job_id: str) -> bool:
         """Проверяет наличие атомарного checkpoint базового сравнения."""

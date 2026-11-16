@@ -33,7 +33,6 @@ CATEGORIES = Literal[
     "text_deleted",
     "text_moved",
     "numbering_changed",
-    "formatting_changed",
     "structure_changed",
     "table_modified",
     "table_structure_changed",

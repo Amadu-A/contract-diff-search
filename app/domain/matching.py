@@ -19,6 +19,7 @@ from app.domain.algorithms import (
 )
 from app.domain.models import DocumentElement, ElementMatch
 from app.domain.text import (
+    NUMBER,
     EquivalenceGroups,
     comparison_content,
     content,
@@ -29,6 +30,30 @@ from app.domain.text import (
     similarity,
     tokens,
 )
+
+
+def _overlap(left: str, right: str) -> float:
+    """Оценивает общий словарь кандидатов, не объявляя разные числа эквивалентными."""
+    a, b = {t[0].casefold() for t in tokens(left)}, {t[0].casefold() for t in tokens(right)}
+    return len(a & b) / max(1, len(a | b))
+
+
+def _field(text: str) -> str:
+    """Узнаёт назначение реквизита, сохраняя его значение для последующего сравнения."""
+    text = text.strip().casefold()
+    for key, pattern in (
+        ("correspondent", r"^(?:кор[.]?\s*сч[её]т|к/с(?:ч[её]т)?)"),
+        ("settlement", r"^р/с"),
+        ("address", r"^адрес:"),
+        ("inn", r"^инн"),
+        ("kpp", r"^кпп"),
+        ("ogrn", r"^огрн"),
+        ("bik", r"^бик"),
+        ("email", r"^e-mail"),
+    ):
+        if re.match(pattern, text):
+            return key
+    return ""
 
 
 def match_elements(
@@ -53,7 +78,26 @@ def match_elements(
     # Повторяющиеся целые значения группы не служат содержательными опорами между разделами.
     excluded_a = {i for i, e in enumerate(old) if exclusion_value(content(e.text), exclusions)}
     excluded_b = {j for j, e in enumerate(new) if exclusion_value(content(e.text), exclusions)}
-    anchors = [(i, j) for i, j in patience(a, b) if i not in excluded_a and j not in excluded_b]
+
+    def compatible(i, j):
+        """Не переносит одинаковый номер/слово между разными пунктами или сторонами таблицы."""
+        left, right = old[i], new[j]
+        if (
+            "cell" in {left.kind, right.kind}
+            and "column" in left.attributes
+            and "column" in right.attributes
+            and left.attributes["column"] != right.attributes["column"]
+        ):
+            return False
+        if _field(left.text) and _field(right.text) and _field(left.text) != _field(right.text):
+            return False
+        return len(tokens(a[i])) >= 5 or left.section == right.section
+
+    anchors = [
+        (i, j)
+        for i, j in patience(a, b)
+        if i not in excluded_a and j not in excluded_b and compatible(i, j)
+    ]
 
     def exclusion_pair(i, j):
         """Разрешает пару только в одном пункте/ячейке, не перенося тире между разделами."""
@@ -99,26 +143,54 @@ def match_elements(
     borders = [(-1, -1), *anchors, (len(a), len(b))]
     for (ai, bi), (aj, bj) in zip(borders, borders[1:], strict=False):
         for i, j in histogram(a[ai + 1 : aj], b[bi + 1 : bj]):
+            oi = ai + 1 + i
+            nj = bi + 1 + j
+            choices = [
+                k
+                for k in range(bi + 1, bj)
+                if b[k] == a[oi] and new[k].section == old[oi].section and compatible(oi, k)
+            ]
+            reverse = [
+                k
+                for k in range(ai + 1, aj)
+                if a[k] == b[nj] and old[k].section == new[nj].section and compatible(k, nj)
+            ]
+            if len(choices) > 1 or len(reverse) > 1:
+                ambiguous_a.update(old[k].id for k in reverse)
+                ambiguous_b.update(new[k].id for k in choices)
+                continue
             if (
                 ai + 1 + i not in excluded_a
                 and bi + 1 + j not in excluded_b
                 and old[ai + 1 + i].section == new[bi + 1 + j].section
+                and compatible(ai + 1 + i, bi + 1 + j)
             ):
                 add(ai + 1 + i, bi + 1 + j, "histogram")
 
     # Поиск точных перенесённых блоков через rolling hash с обязательной проверкой текста.
     index = rolling_hash(b, 1)
+    old_index = rolling_hash(a, 1)
     for i, value in enumerate(a):
-        if i in used_a or i in excluded_a or len(value) < 12:
+        if i in used_a or i in excluded_a or not value:
             continue
         hashes = rolling_hash([value], 1)
         candidates = [
             j
             for j in index.get(next(iter(hashes)), [])
-            if j not in used_b and j not in excluded_b and b[j] == value
+            if j not in used_b and j not in excluded_b and b[j] == value and compatible(i, j)
         ]
         if len(candidates) == 1:
-            add(i, candidates[0], "rabin_karp")
+            j = candidates[0]
+            reverse = [
+                k
+                for k in old_index[next(iter(hashes))]
+                if k not in used_a and a[k] == value and compatible(k, j)
+            ]
+            if len(reverse) > 1:
+                ambiguous_a.update(old[k].id for k in reverse)
+                ambiguous_b.add(new[j].id)
+            else:
+                add(i, j, "rabin_karp")
 
     # Сначала содержательные split/merge, затем частично изменённые кандидаты.
     for left, right, occupied_l, occupied_r, reverse in (
@@ -127,9 +199,13 @@ def match_elements(
     ):
         grouped = defaultdict(list)
         for j in range(len(right)):
-            for count in (2, 3):
+            for count in range(2, 13):
                 group = right[j : j + count]
-                if len(group) == count and not any(j + k in occupied_r for k in range(count)):
+                if (
+                    len(group) == count
+                    and len({e.section for e in group}) == 1
+                    and not any(j + k in occupied_r for k in range(count))
+                ):
                     combined = comparison_content(
                         " ".join(content(e.text) for e in group), exclusions
                     )
@@ -157,6 +233,100 @@ def match_elements(
                 occupied_l.add(i)
                 occupied_r.update(range(j, j + count))
 
+    # Изменённый пункт тоже может быть разделён на несколько абзацев только с одной стороны.
+    for left, right, occupied_l, occupied_r, reverse in (
+        (old, new, used_a, used_b, False),
+        (new, old, used_b, used_a, True),
+    ):
+        field_index = defaultdict(list)
+        for j, other in enumerate(right):
+            field_index[(other.section, other.attributes.get("column"), _field(other.text))].append(
+                j
+            )
+        for i, element in enumerate(left):
+            if i in occupied_l or not _field(element.text):
+                continue
+            candidates = []
+            for j in field_index[
+                (element.section, element.attributes.get("column"), _field(element.text))
+            ]:
+                other = right[j]
+                if (
+                    j in occupied_r
+                    or _field(other.text) != _field(element.text)
+                    or other.section != element.section
+                    or other.attributes.get("column") != element.attributes.get("column")
+                ):
+                    continue
+                for count in range(2, 5):
+                    group = right[j : j + count]
+                    if len(group) != count or any(
+                        j + k in occupied_r
+                        or e.section != element.section
+                        or e.attributes.get("column") != element.attributes.get("column")
+                        for k, e in enumerate(group)
+                    ):
+                        break
+                    if any(
+                        _field(e.text)
+                        and _field(e.text) != _field(element.text)
+                        and not (
+                            _field(element.text) == "inn"
+                            and _field(e.text) == "kpp"
+                            and "кпп" in element.text.casefold()
+                        )
+                        for e in group[1:]
+                    ):
+                        break
+                    joined = " ".join(e.text for e in group)
+                    score = _overlap(element.text, joined)
+                    if score >= 0.65 and score > _overlap(element.text, other.text) + 0.1:
+                        candidates.append((score, j, count))
+            candidates.sort(reverse=True)
+            if candidates and (len(candidates) == 1 or candidates[0][0] - candidates[1][0] >= 0.06):
+                score, j, count = candidates[0]
+                l_ids, r_ids = [element.id], [e.id for e in right[j : j + count]]
+                matches.append(
+                    ElementMatch(
+                        r_ids if reverse else l_ids,
+                        l_ids if reverse else r_ids,
+                        "field_split_merge",
+                        score,
+                    )
+                )
+                occupied_l.add(i)
+                occupied_r.update(range(j, j + count))
+    for section in {e.section for e in old} & {e.section for e in new} - {""}:
+        left = [i for i, e in enumerate(old) if e.section == section and i not in used_a]
+        right = [j for j, e in enumerate(new) if e.section == section and j not in used_b]
+        if (
+            not left
+            or not right
+            or max(len(left), len(right)) > 12
+            or min(len(left), len(right)) != 1
+        ):
+            continue
+        if any(
+            sum(bool(NUMBER.match(elements[index].text.lstrip())) for index in indices) > 1
+            for elements, indices in ((old, left), (new, right))
+        ):
+            continue
+        before = " ".join(a[i] for i in left)
+        after = " ".join(b[j] for j in right)
+        if max(similarity(before.casefold(), after.casefold()), _overlap(before, after)) < 0.4:
+            continue
+        if len(left) > 1 or len(right) > 1:
+            matches.append(
+                ElementMatch(
+                    [old[i].id for i in left],
+                    [new[j].id for j in right],
+                    "section_split_merge",
+                    0.85,
+                )
+            )
+            used_a.update(left)
+            used_b.update(right)
+
     sections, grams = defaultdict(list), defaultdict(set)
     for j, element in enumerate(new):
         if j not in used_b and j not in excluded_b:
@@ -165,7 +335,7 @@ def match_elements(
                 grams[gram].add(j)
     pending = []
     for i, element in enumerate(old):
-        if i in used_a or i in excluded_a:
+        if i in used_a or i in excluded_a or element.id in ambiguous_a:
             continue
         votes = Counter(
             j for gram in shingles(a[i]) if len(grams[gram]) <= 128 for j in grams[gram]
@@ -178,6 +348,14 @@ def match_elements(
             if j in used_b:
                 continue
             other = new[j]
+            if a[i] == b[j] and not compatible(i, j):
+                continue
+            if (
+                _field(element.text)
+                and _field(other.text)
+                and _field(element.text) != _field(other.text)
+            ):
+                continue
             if (
                 element.kind == "cell"
                 and "column" in element.attributes
@@ -185,8 +363,12 @@ def match_elements(
                 and element.attributes["column"] != other.attributes["column"]
             ):
                 continue
-            score = similarity(a[i], b[j])
+            score = similarity(a[i].casefold(), b[j].casefold())
             same_section = bool(element.section and element.section == other.section)
+            if same_section and _field(element.text) and _field(element.text) == _field(other.text):
+                score = max(score, 0.7)
+            if same_section:
+                score = max(score, _overlap(a[i], b[j]))
             if same_section and ocr_equivalent(
                 content(element.text),
                 content(other.text),

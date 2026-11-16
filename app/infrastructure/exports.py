@@ -435,16 +435,22 @@ class DocumentExporter:
                 original = by_key.get(key)
             except (KeyError, ValueError):
                 original = None
-            if original is not None and original.text == element.text:
+            offset = int(element.attributes.get("text_offset", "0"))
+            if (
+                original is not None
+                and original.text[offset : offset + len(element.text)] == element.text
+            ):
                 if (
                     span
-                    and 0 <= span[0] < span[1] <= len(original.text)
+                    and 0 <= span[0] < span[1] <= len(element.text)
                     and (
                         not text
-                        or normalize(original.text[span[0] : span[1]]).text == normalize(text).text
+                        or normalize(element.text[span[0] : span[1]]).text == normalize(text).text
                     )
                 ):
-                    return DocumentExporter._without_prefix(original, span)
+                    return DocumentExporter._without_prefix(
+                        original, (span[0] + offset, span[1] + offset)
+                    )
                 if difference.category == "formatting_changed":
                     return DocumentExporter._without_prefix(original, (0, len(original.text)))
                 found = _span(original.text, text, text) if text else None

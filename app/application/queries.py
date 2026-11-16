@@ -9,10 +9,18 @@ from app.domain.models import TERMINAL, Difference, JobStatus
 from app.domain.visibility import is_unverified, visible
 
 
-def comparison_report(data: dict, job, show_unverified: bool = True) -> dict:
+def comparison_report(
+    data: dict,
+    job,
+    show_unverified: bool = True,
+    category: str | list[str] | tuple[str, ...] | None = (),
+    status: str = "",
+) -> dict:
     """Готовит факты отчёта с учётом видимости, без оформления и структуры таблиц; статусы не меняет."""
     unique = {}
-    for item in data["differences"]:
+    for item in filter_differences(
+        data, category, status, 0, len(data["differences"]), show_unverified
+    )["items"]:
         if not visible(item, show_unverified) or item["category"] in {
             "formatting_changed",
             "table_structure_changed",
@@ -129,16 +137,25 @@ def summary(data: dict) -> dict:
 
 
 def filter_differences(
-    data: dict, category: str, status: str, offset: int, limit: int, show_unverified: bool = True
+    data: dict,
+    category: str | list[str] | tuple[str, ...] | None,
+    status: str,
+    offset: int,
+    limit: int,
+    show_unverified: bool = True,
 ) -> dict:
     """Фильтрует уникальные изменения, не меняя исходный результат и покрытие."""
+    categories = {category} if isinstance(category, str) and category else set(category or ())
+    categories.discard("")
     items = [
         d
         for d in data["differences"]
         if visible(d, show_unverified)
         and (
-            not category
-            or (is_unverified(d) if category == "unverified_region" else d["category"] == category)
+            not categories
+            or d["category"] in categories
+            or "unverified_region" in categories
+            and is_unverified(d)
         )
         and (
             not status
@@ -215,11 +232,52 @@ def ai_operations(data: dict, offset: int, limit: int) -> dict:
     }
 
 
-def correspondence(data: dict, side: str, page: int) -> dict:
+def correspondence(data: dict, side: str, page: int, difference_id: str = "") -> dict:
     """Выбирает связанную страницу по голосам сопоставленных элементов; ничью не угадывает."""
     other = "new" if side == "old" else "old"
     own = {e["id"]: e for e in data[side]["elements"]}
     partner = {e["id"]: e for e in data[other]["elements"]}
+    if difference_id:
+        difference = next((d for d in data["differences"] if d["id"] == difference_id), None)
+        identifier = difference.get(side + "_element") if difference else None
+        if identifier not in own:
+            if difference and any(r["page"] == page for r in difference[side + "_regions"]):
+                return correspondence(data, side, page)
+            return {"page": None, "method": "missing_anchor"}
+        positions = {key: i for i, key in enumerate(own)}
+        origin = positions[identifier]
+        neighbors = []
+        for match in data["matches"]:
+            if match.get("source") == "ai" or match.get("confidence", 0) < 0.65:
+                continue
+            indices = [positions[key] for key in match[side] if key in positions]
+            if not indices or min(indices) <= origin <= max(indices):
+                continue
+            before = max(indices) < origin
+            target_pages = [
+                w["region"]["page"] for key in match[other] for w in partner[key]["words"]
+            ]
+            if not target_pages:
+                continue
+            index = max(indices) if before else min(indices)
+            neighbors.append(
+                (
+                    before,
+                    abs(origin - index),
+                    max(target_pages) if before else min(target_pages),
+                    own[match[side][0]]["section"] == own[identifier]["section"],
+                )
+            )
+        nearest = [
+            min((n for n in neighbors if n[0] == before), key=lambda n: n[1], default=None)
+            for before in (True, False)
+        ]
+        anchors = [n for n in nearest if n]
+        if len(anchors) == 2 and anchors[0][2] == anchors[1][2]:
+            return {"page": anchors[0][2], "method": "neighbor_anchors"}
+        if len(anchors) == 1 and anchors[0][1] <= 2 and anchors[0][3]:
+            return {"page": anchors[0][2], "method": "section_anchor"}
+        return {"page": None, "method": "ambiguous"}
     votes = Counter()
     for match in data["matches"]:
         if match.get("source") == "ai":

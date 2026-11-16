@@ -2,7 +2,7 @@
 /** Независимые проверки правил формы и границ навигации без браузерного DOM. */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fileError, boundedPage, terminalStatus, categoryLabel, isUnverified, visibleDifference } from '../../app/web/static/js/state.js';
+import { fileError, boundedPage, terminalStatus, categoryLabel, isUnverified, visibleDifference, defaultCategories, differenceFilters } from '../../app/web/static/js/state.js';
 
 test('валидация принимает все три формата и граничный размер', () => {
   for (const name of ['a.doc','b.DOCX','c.pdf']) assert.equal(fileError({name,size:1024**2},1),'');
@@ -41,4 +41,13 @@ test('все активные неподтверждённые события и
     assert.equal(isUnverified({...item,active:false}),false);
   }
   assert.equal(isUnverified({category:'number_modified',status:'confirmed'}),false);
+});
+
+test('несколько категорий одинаково передаются списку и отчёту', () => {
+  assert.deepEqual(defaultCategories, ['number_modified','text_modified','text_added','text_deleted','table_modified']);
+  const query = differenceFilters(['text_modified','number_modified'], 'confirmed', false);
+  assert.deepEqual(query.getAll('category'), ['text_modified','number_modified']);
+  assert.equal(query.get('show_unverified'), 'false');
+  assert.equal(query.get('status'), 'confirmed');
+  assert.deepEqual(differenceFilters([], '', true).getAll('category'), []);
 });

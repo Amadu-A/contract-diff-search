@@ -3,6 +3,8 @@
 
 import re
 from collections import Counter
+from dataclasses import replace
+from itertools import zip_longest
 
 from app.domain.algorithms import damerau_levenshtein, myers
 from app.domain.matching import match_elements
@@ -22,6 +24,7 @@ from app.domain.text import (
     comparison_tokens,
     exclusion_value,
     ocr_equivalent,
+    requisite_values,
 )
 from app.domain.visibility import is_unverified, uncertainty_ids
 
@@ -68,6 +71,8 @@ def _text_differences(
     ocr_exclusions: EquivalenceGroups = (),
 ) -> list[Difference]:
     """Сравнивает локальные токены, не теряя проценты, отрицания и пунктуацию."""
+    if requisite_values(old.text) and requisite_values(old.text) == requisite_values(new.text):
+        return []
     ta, tb = comparison_tokens(old.text, exclusions), comparison_tokens(new.text, exclusions)
     edits = myers([t[0] for t in ta], [t[0] for t in tb])
     result, deleted, inserted = [], [], []
@@ -190,6 +195,64 @@ def _text_differences(
     return result
 
 
+def _joined(elements: list[DocumentElement]) -> DocumentElement:
+    """Создаёт поисковое представление группы, не меняя исходные слова и OOXML-якоря."""
+    text, words = "", []
+    for element in elements:
+        offset = len(text) + bool(text)
+        text += (" " if text else "") + element.text
+        words.extend(replace(w, start=w.start + offset, end=w.end + offset) for w in element.words)
+    return replace(
+        elements[0], text=text, words=words, confidence=min(e.confidence for e in elements)
+    )
+
+
+def _group_differences(old, new, ocr_involved, exclusions, ocr_exclusions):
+    """Возвращает изменения группы к настоящим диапазонам отдельных исходных элементов."""
+    result = []
+    for difference in _text_differences(
+        _joined(old), _joined(new), ocr_involved, exclusions, ocr_exclusions
+    ):
+        sides = []
+        for elements, span in ((old, difference.old_range), (new, difference.new_range)):
+            if span:
+                literal = difference.old_text if elements is old else difference.new_text
+                full_text = _joined(elements).text
+                complete = (
+                    [
+                        (m.start(), m.end())
+                        for m in re.finditer(re.escape(literal), full_text)
+                        if m.start() <= span[0] and m.end() >= span[1]
+                    ]
+                    if literal
+                    else []
+                )
+                if len(complete) == 1:
+                    span = complete[0]
+            pieces, offset = [], 0
+            for element in elements:
+                if span and span[1] > offset and span[0] < offset + len(element.text):
+                    start, end = max(0, span[0] - offset), min(len(element.text), span[1] - offset)
+                    pieces.append((element, (start, end)))
+                offset += len(element.text) + 1
+            sides.append(pieces)
+        for left, right in zip_longest(*sides):
+            item = replace(difference)
+            for side, piece in (("old", left), ("new", right)):
+                element, span = piece if piece else (None, None)
+                setattr(item, side + "_element", element.id if element else None)
+                setattr(item, side + "_range", span)
+                setattr(item, side + "_text", element.text[slice(*span)] if element else "")
+                setattr(item, side + "_section", element.section if element else "")
+                setattr(item, side + "_regions", regions(element, *span) if element else [])
+            if not left:
+                item.category = "text_added"
+            elif not right:
+                item.category = "text_deleted"
+            result.append(item)
+    return result
+
+
 def compare(
     old: DocumentVersion,
     new: DocumentVersion,
@@ -207,36 +270,39 @@ def compare(
     )
     oa, nb = {e.id: e for e in old.elements}, {e.id: e for e in new.elements}
     coverage_a, coverage_b, differences = {}, {}, []
-    compare_format = (
-        old.format in {"doc", "docx"}
-        and new.format in {"doc", "docx"}
-        or (
-            old.format == new.format == "pdf"
-            and all(p.mode == "text" for v in (old, new) for p in v.pages)
-        )
-    )
     for match in matches:
         if match.method == "comparison_exclusion":
             coverage_a[match.old[0]] = coverage_b[match.new[0]] = "unchanged"
             continue
         before, after = oa[match.old[0]], nb[match.new[0]]
         changes = []
-        if (len(match.old) > 1 or len(match.new) > 1) and old.format == new.format:
-            changes.append(
-                Difference(
-                    "",
-                    "structure_changed",
-                    "Разбиение или объединение абзацев",
-                    " ".join(oa[i].text for i in match.old),
-                    " ".join(nb[i].text for i in match.new),
-                    before.section,
-                    after.section,
-                    [r for i in match.old for r in regions(oa[i])],
-                    [r for i in match.new for r in regions(nb[i])],
-                    before.id,
-                    after.id,
+        if len(match.old) > 1 or len(match.new) > 1:
+            left, right = [oa[i] for i in match.old], [nb[i] for i in match.new]
+            changes.extend(
+                _group_differences(
+                    left,
+                    right,
+                    uses_ocr(old, before) or uses_ocr(new, after),
+                    exclusions,
+                    active_ocr_groups,
                 )
             )
+            if old.format == new.format:
+                changes.append(
+                    Difference(
+                        "",
+                        "structure_changed",
+                        "Разбиение или объединение абзацев",
+                        " ".join(oa[i].text for i in match.old),
+                        " ".join(nb[i].text for i in match.new),
+                        before.section,
+                        after.section,
+                        [r for i in match.old for r in regions(oa[i])],
+                        [r for i in match.new for r in regions(nb[i])],
+                        before.id,
+                        after.id,
+                    )
+                )
         elif len(match.old) == 1 and len(match.new) == 1:
             ocr_involved = uses_ocr(old, before) or uses_ocr(new, after)
             changes.extend(
@@ -296,29 +362,6 @@ def compare(
                     )
                 )
             if (
-                compare_format
-                and before.runs != after.runs
-                and comparison_content(before.text, exclusions)
-                == comparison_content(after.text, exclusions)
-                and _style_signature(before, exclusions) != _style_signature(after, exclusions)
-            ):
-                # Сдвиг диапазонов из-за текста не является отдельным форматным событием.
-                changes.append(
-                    Difference(
-                        "",
-                        "formatting_changed",
-                        "Изменено оформление",
-                        before.text,
-                        after.text,
-                        before.section,
-                        after.section,
-                        regions(before),
-                        regions(after),
-                        before.id,
-                        after.id,
-                    )
-                )
-            if (
                 (
                     before.kind != after.kind
                     or before.attributes.get("grid", "") != after.attributes.get("grid", "")
@@ -363,9 +406,10 @@ def compare(
                 )
             )
         state = "changed" if changes else "unchanged"
-        if any(_low_confidence(e, exclusions) for e in (before, after)) or any(
+        matched_elements = [oa[i] for i in match.old] + [nb[i] for i in match.new]
+        if any(_low_confidence(e, exclusions) for e in matched_elements) or any(
             w.confidence < 0.65 or not w.verified
-            for e in (before, after)
+            for e in matched_elements
             for w in e.words
             if re.search(r"\d", w.text)
         ):
@@ -381,6 +425,18 @@ def compare(
         (new.elements, coverage_b, ambiguous_b, "new"),
     ):
         for element in elements:
+            if (
+                old.format != new.format
+                and element.kind == "cell"
+                and re.fullmatch(r"м\s*[.]?\s*п[.]?", element.text.strip(), re.IGNORECASE)
+                and any(
+                    e.attributes.get("cell_path") == element.attributes.get("cell_path")
+                    and "директор" in e.text.casefold()
+                    for e in elements
+                )
+            ):
+                coverage[element.id] = "unchanged"
+                continue
             if element.id in coverage:
                 if coverage[element.id] != "unverified":
                     continue
@@ -712,19 +768,6 @@ def _group_uncertainties(differences, matches) -> None:
                 candidate.reason = "; ".join(
                     dict.fromkeys(filter(None, (candidate.reason, warning.reason)))
                 )
-
-
-def _style_signature(element: DocumentElement, exclusions: EquivalenceGroups = ()) -> tuple:
-    """Сравнивает оформление эквивалентного текста без ложных сдвигов от runs и замен разной длины."""
-    styles = [()] * len(element.text)
-    for run in element.runs:
-        styles[max(0, run.start) : min(len(styles), run.end)] = [run.properties] * max(
-            0, min(len(styles), run.end) - max(0, run.start)
-        )
-    mapped = canonicalize(element.text, exclusions)
-    return tuple(
-        styles[mapped.positions[i]] for i, char in enumerate(mapped.text) if not char.isspace()
-    )
 
 
 def _graphics(

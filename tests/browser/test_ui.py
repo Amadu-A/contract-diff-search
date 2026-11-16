@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from threading import Thread
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pytest
@@ -30,6 +31,12 @@ from tests.factories import pdf
 from tests.unit.test_ai_review import Reviewer
 
 pytestmark = pytest.mark.browser
+
+
+def choose_categories(page, *categories):
+    """Выбирает несколько категорий через настоящие checkbox-события без подмены HTTP."""
+    for checkbox in page.locator("[data-category-filter]").all():
+        checkbox.set_checked(checkbox.get_attribute("value") in categories)
 
 
 def test_unverified_filters_include_ambiguous_matches_without_design_changes(
@@ -64,12 +71,12 @@ def test_unverified_filters_include_ambiguous_matches_without_design_changes(
 
     expect(page.locator("[data-warning]")).to_be_visible()
     page.locator("[data-filter-toggle]").click()
-    page.locator("[data-category-filter]").select_option("unverified_region")
+    choose_categories(page, "unverified_region")
     expect(page.locator("[data-differences] [data-index]")).to_have_count(3)
     expect(page.locator("[data-detail-reason]")).to_contain_text("Недостаточно доказательств")
-    page.locator("[data-category-filter]").select_option("ambiguous_match")
+    choose_categories(page, "ambiguous_match")
     expect(page.locator("[data-differences] [data-index]")).to_have_count(3)
-    page.locator("[data-category-filter]").select_option("")
+    choose_categories(page)
     page.locator("[data-status-filter]").select_option("unverified")
     expect(page.locator("[data-differences] [data-index]")).to_have_count(3)
     page.locator("[data-show-unverified-toggle]").uncheck()
@@ -80,7 +87,7 @@ def test_unverified_filters_include_ambiguous_matches_without_design_changes(
     for show in (False, True, False):
         page.locator("[data-show-unverified-toggle]").set_checked(show)
         expect(report).to_have_attribute(
-            "href", __import__("re").compile(rf"show_unverified={str(show).lower()}$")
+            "href", __import__("re").compile(rf"show_unverified={str(show).lower()}(?:&|$)")
         )
         with page.expect_download() as downloaded:
             report.click()
@@ -91,7 +98,9 @@ def test_unverified_filters_include_ambiguous_matches_without_design_changes(
         assert "70%" in text and "50%" in text
         expect(page.locator('[data-stat="unverified"]')).to_have_text("3")
     page.locator("[data-show-unverified]").click()
-    expect(report).to_have_attribute("href", __import__("re").compile(r"show_unverified=true$"))
+    expect(report).to_have_attribute(
+        "href", __import__("re").compile(r"show_unverified=true(?:&|$)")
+    )
 
 
 def test_report_button_alignment_download_and_reset(live_server, browser_page, tmp_path):
@@ -110,7 +119,9 @@ def test_report_button_alignment_download_and_reset(live_server, browser_page, t
     page.locator("[data-start]").click()
     expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
     expect(button).to_contain_text("Скачать отчёт")
-    expect(button).to_have_attribute("href", __import__("re").compile(r"show_unverified=false$"))
+    expect(button).to_have_attribute(
+        "href", __import__("re").compile(r"show_unverified=false(?:&|$)")
+    )
     report_box = button.bounding_box()
     pdf_box = page.locator("[data-viewer=old] [data-export-pdf]").bounding_box()
     assert report_box["x"] < pdf_box["x"]
@@ -269,7 +280,7 @@ def test_external_bot_link_opens_ready_read_only_result(live_server, browser_pag
     expect(browser_page.locator('[data-stat="total"]')).to_have_text("1")
     browser_page.locator("[data-show-unverified-toggle]").uncheck()
     expect(browser_page.locator("[data-export-report]")).to_have_attribute(
-        "href", __import__("re").compile(r"show_unverified=false$")
+        "href", __import__("re").compile(r"show_unverified=false(?:&|$)")
     )
     with browser_page.expect_download() as downloaded:
         browser_page.locator("[data-export-report]").click()
@@ -384,7 +395,7 @@ def test_upload_compare_view_search_export_and_reset(live_server, browser_page, 
     viewer.locator("[data-search-form]").get_by_role("button", name="Найти", exact=True).click()
     expect(viewer.locator("[data-search-count]")).to_have_text("1/1")
     page.locator("[data-filter-toggle]").click()
-    page.locator("[data-category-filter]").select_option("number_modified")
+    choose_categories(page, "number_modified")
     expect(page.locator("[data-list-count]")).to_have_text("1")
     page.locator("[data-sync]").click()
     expect(page.locator("[data-sync]")).to_have_attribute("aria-pressed", "false")
@@ -516,7 +527,9 @@ def test_ai_controls_and_visibility_export_without_recomparison(
     assert page.locator(".viewer__region--warning").count() == 0
     for side in ("old", "new"):
         link = page.locator(f"[data-viewer={side}] [data-export-pdf]")
-        expect(link).to_have_attribute("href", __import__("re").compile(r"show_unverified=false$"))
+        expect(link).to_have_attribute(
+            "href", __import__("re").compile(r"show_unverified=false(?:&|$)")
+        )
         with page.expect_download() as download:
             link.click()
         output = tmp_path / f"{side}-clean.pdf"
@@ -539,8 +552,8 @@ def test_real_contracts_matrix_and_visual_exports(live_server, browser_page, tmp
     from playwright.sync_api import expect
 
     originals = ROOT / "examples"
-    old = next(originals.glob("*.docx"), None)
-    new = next(originals.glob("*.pdf"), None)
+    old = next(originals.glob("Договор_поставки*.docx"), None)
+    new = next(originals.glob("Договор_поставки*.pdf"), None)
     if old is None or new is None:
         pytest.skip("Локальные реальные договоры отсутствуют")
     hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (old, new)}
@@ -558,6 +571,8 @@ def test_real_contracts_matrix_and_visual_exports(live_server, browser_page, tmp
     job = accepted.value.json()
     expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=240000)
     result = service.storage.read_result(job["id"])
+    page.locator("[data-filter-toggle]").click()
+    page.locator("[data-filter-all]").click()
     matrix = json.loads((originals / "golden-matrix.json").read_text(encoding="utf-8"))
     validation = validate_matrix(matrix, result)
     output = ROOT / ".cache/real-verified"
@@ -601,3 +616,114 @@ def test_real_contracts_matrix_and_visual_exports(live_server, browser_page, tmp
         download.value.save_as(str(output / f"{side}-highlighted.pdf"))
     assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (old, new)} == hashes
     assert validation["failed"] == 0, validation
+
+
+def test_multiple_filters_report_and_missing_side_navigation(live_server, browser_page, tmp_path):
+    """Фильтры, сброс, PDF-отчёт и оба направления переходов учитывают пагинацию 6/4 и выключатель связи."""
+    from playwright.sync_api import expect
+
+    from app.domain.models import Page
+    from tests.factories import version
+    from tests.fakes import FakeExtractor
+
+    old = version(
+        [
+            "8.1. Предыдущий длинный неизменный пункт договора.",
+            "8.2. Подрядчик возмещает расходы при отмене заказа.",
+            "8.3. Следующий длинный неизменный пункт договора.",
+            "9.1. Аванс 50%.",
+        ],
+        "pdf",
+    )
+    new = version(
+        [
+            old.elements[0].text,
+            "8.4. Покупатель самостоятельно организует перевозку продукции.",
+            old.elements[2].text,
+            "9.1. Аванс 70%.",
+        ],
+        "pdf",
+    )
+    for doc, count in ((old, 6), (new, 4)):
+        doc.pages = [Page(i, 600, 850, "text", 1.0) for i in range(1, count + 1)]
+        for element in doc.elements:
+            element.words = [
+                replace(w, region=replace(w.region, page=count)) for w in element.words
+            ]
+        doc.pdf = str(pdf(tmp_path / f"model-{count}.pdf", ["Navigation test"], pages=count))
+    url, service = live_server
+    service.extractor = FakeExtractor(old, new)
+    page = browser_page
+    page.goto(url)
+    for side, doc in (("old", old), ("new", new)):
+        page.locator(f"[data-upload={side}] [data-file-input]").set_input_files(doc.pdf)
+    page.locator("[data-start]").click()
+    expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
+    page.get_by_role("button", name="Фильтры", exact=True).click()
+    choose_categories(page, "text_deleted", "number_modified")
+    expect(page.locator("[data-list-count]")).to_have_text("2")
+    page.locator("[data-differences] button").filter(has_text="удалён фрагмент").click()
+    expect(page.locator("[data-viewer=old] [data-page-number]")).to_have_value("6")
+    expect(page.locator("[data-viewer=new] [data-page-number]")).to_have_value("4")
+    report = page.locator("[data-export-report]")
+    screenshots = Path(".cache/screenshots")
+    screenshots.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(screenshots / "multiple-filters.png"), full_page=True)
+    assert parse_qs(urlsplit(report.get_attribute("href")).query)["category"] == [
+        "number_modified",
+        "text_deleted",
+    ]
+    with page.expect_download() as download:
+        report.click()
+    file = tmp_path / "filtered-report.pdf"
+    download.value.save_as(file)
+    text = "".join(p.extract_text() for p in PdfReader(file).pages)
+    assert "возмещает" in text and "самостоятельно" not in text
+    page.locator("[data-sync]").click()
+    control = page.locator("[data-viewer=new] [data-page-number]")
+    control.fill("1")
+    control.press("Enter")
+    expect(control).to_have_value("1")
+    page.locator("[data-differences] button").filter(has_text="удалён фрагмент").click()
+    expect(control).to_have_value("1")
+    page.locator("[data-sync]").click()
+    page.locator("[data-filter-reset]").click()
+    expect(page.locator("[data-list-count]")).to_have_text("3")
+    page.locator("[data-differences] button").filter(has_text="добавлен фрагмент").click()
+    expect(control).to_have_value("4")
+    expect(page.locator("[data-viewer=old] [data-page-number]")).to_have_value("6")
+
+
+@pytest.mark.real
+def test_real_six_to_four_pages_selection_and_filters(live_server, browser_page, tmp_path):
+    """Новая приватная пара проходит реальный worker и показывает связанный переход 6 → 4."""
+    from playwright.sync_api import expect
+
+    files = [ROOT / "examples" / name for name in ("old.docx", "new.pdf")]
+    if not all(p.is_file() for p in files):
+        pytest.skip("Приватная пара 6/4 страницы отсутствует")
+    page = browser_page
+    page.goto(live_server[0])
+    for side, path in zip(("old", "new"), files, strict=True):
+        page.locator(f"[data-upload={side}] [data-file-input]").set_input_files(str(path))
+    page.locator("[data-start]").click()
+    expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=180000)
+    expect(page.locator("[data-viewer=old] [data-page-count]")).to_have_text("/ 6")
+    expect(page.locator("[data-viewer=new] [data-page-count]")).to_have_text("/ 4")
+    expect(page.locator("[data-viewer=old] [data-export-word]")).to_be_visible()
+    expect(page.locator("[data-viewer=new] [data-export-word]")).to_be_hidden()
+    page.locator("[data-filter-toggle]").click()
+    choose_categories(page, "text_deleted")
+    page.locator("[data-differences] button").filter(has_text="Пункт 8.5 —").first.click()
+    expect(page.locator("[data-viewer=old] [data-page-number]")).to_have_value("6")
+    expect(page.locator("[data-viewer=new] [data-page-number]")).to_have_value("4")
+    page.locator("[data-show-unverified-toggle]").uncheck()
+    with page.expect_download() as download:
+        page.locator("[data-export-report]").click()
+    report = tmp_path / "real-filtered-report.pdf"
+    download.value.save_as(report)
+    text = "".join(p.extract_text() for p in PdfReader(report).pages)
+    assert "возвратить" in text
+    output = ROOT / ".cache/advertising-verified"
+    output.mkdir(parents=True, exist_ok=True)
+    page.screenshot(path=str(output / "ui-6-to-4.png"), full_page=True)

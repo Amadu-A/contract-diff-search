@@ -1,22 +1,27 @@
 // app/web/static/js/features/results.js
 /** Фильтры, реальные счётчики, список и детали; недоверенные строки выводятся textContent. */
 import { apiRequest, jobUrl } from '../api.js';
-import { categoryLabel, isUnverified } from '../state.js';
+import { categoryLabel, isUnverified, defaultCategories, differenceFilters } from '../state.js';
 
 export class Results {
   /** Подключает список к двум просмотрщикам и обработчику ошибок. */
-  constructor(viewers, onError) {
+  constructor(viewers, onError, onSelect = async () => {}) {
     this.viewers = viewers;
     this.onError = onError;
+    this.onSelect = onSelect;
     this.items = [];
     this.index = -1;
     this.generation = 0;
+    this.selection = 0;
     this.showUnverified = true;
     document.querySelector('[data-filter-toggle]').addEventListener('click', () => {
       const filters = document.querySelector('[data-filters]');
       filters.hidden = !filters.hidden;
+      document.querySelector('[data-filter-toggle]').setAttribute('aria-expanded', String(!filters.hidden));
     });
     for (const filter of document.querySelectorAll('[data-category-filter],[data-status-filter]')) filter.addEventListener('change', () => this.load().catch(onError));
+    document.querySelector('[data-filter-reset]').addEventListener('click', () => { this.resetFilters(); this.load().catch(onError); });
+    document.querySelector('[data-filter-all]').addEventListener('click', () => { this.setCategories([]); this.load().catch(onError); });
     document.querySelector('[data-load-more]').addEventListener('click', () => this.load(true).catch(onError));
     document.querySelector('[data-diff-prev]').addEventListener('click', () => this.select(this.index - 1));
     document.querySelector('[data-diff-next]').addEventListener('click', () => this.select(this.index + 1));
@@ -25,11 +30,33 @@ export class Results {
       document.querySelector('[data-show-unverified-toggle]').checked = true;
       this.setVisibility(true);
       document.querySelector('[data-status-filter]').value = 'unverified';
-      document.querySelector('[data-category-filter]').value = '';
+      this.setCategories([]);
       document.querySelector('[data-filters]').hidden = false;
       this.load().catch(onError);
     });
     document.querySelector('[data-dismiss-warning]').addEventListener('click', () => { document.querySelector('[data-warning]').hidden = true; });
+  }
+
+  /** Выбирает категории; пустой набор означает все категории. */
+  setCategories(categories) {
+    for (const checkbox of document.querySelectorAll('[data-category-filter]')) checkbox.checked = categories.includes(checkbox.value);
+  }
+
+  /** Возвращает исходный содержательный набор и все статусы. */
+  resetFilters() {
+    this.setCategories(defaultCategories);
+    document.querySelector('[data-status-filter]').value = '';
+  }
+
+  /** Собирает одинаковый фильтр для списка и скачиваемого отчёта. */
+  filters() {
+    return differenceFilters([...document.querySelectorAll('[data-category-filter]:checked')].map(node => node.value), document.querySelector('[data-status-filter]').value, this.showUnverified);
+  }
+
+  /** Обновляет ссылку, не меняя сохранённый результат и не запуская сравнение. */
+  updateReport() {
+    const report = document.querySelector('[data-export-report]');
+    if (this.job && report.hasAttribute('href')) report.href = jobUrl(this.job, `/report?${this.filters()}`);
   }
 
   /** Привязывает завершённое задание и его сводку к интерфейсу. */
@@ -53,11 +80,10 @@ export class Results {
     this.viewers.forEach(viewer => viewer.setVisibility(value));
     if (!value) {
       if (document.querySelector('[data-status-filter]').value === 'unverified') document.querySelector('[data-status-filter]').value = '';
-      if (['unverified_region','ambiguous_match'].includes(document.querySelector('[data-category-filter]').value)) document.querySelector('[data-category-filter]').value = '';
+
     }
     if (this.job) {
-      const report = document.querySelector('[data-export-report]');
-      if (report.hasAttribute('href')) report.href = jobUrl(this.job, `/report?show_unverified=${value}`);
+      this.updateReport();
       await this.load();
     }
   }
@@ -66,13 +92,13 @@ export class Results {
   async load(append = false, quiet = false) {
     if (!this.job) return;
     const generation = ++this.generation;
-    const category = document.querySelector('[data-category-filter]').value;
-    const status = document.querySelector('[data-status-filter]').value;
+    const query = this.filters();
+    this.updateReport();
     const offset = append ? this.items.length : 0;
     const selected = this.items[this.index]?.id;
     const list = document.querySelector('[data-differences]');
     const scrollTop = list.scrollTop;
-    const response = await apiRequest(jobUrl(this.job, `/differences?category=${encodeURIComponent(category)}&status=${encodeURIComponent(status)}&offset=${offset}&limit=200&show_unverified=${this.showUnverified}`));
+    const response = await apiRequest(jobUrl(this.job, `/differences?${query}&offset=${offset}&limit=200`));
     if (generation !== this.generation) return;
     this.items = append ? [...this.items, ...response.items] : response.items;
     document.querySelector('[data-list-count]').textContent = response.total;
@@ -117,6 +143,8 @@ export class Results {
   async select(index, navigate = true) {
     if (index < 0 || index >= this.items.length) return;
     this.index = index;
+    const selection = ++this.selection;
+    const job = this.job;
     const item = this.items[index];
     document.querySelector('[data-detail-empty]').hidden = true;
     document.querySelector('[data-detail-body]').hidden = false;
@@ -138,7 +166,12 @@ export class Results {
     document.querySelector('[data-diff-prev]').disabled = index === 0;
     document.querySelector('[data-diff-next]').disabled = index === this.items.length - 1;
     for (const button of document.querySelectorAll('[data-index]')) button.setAttribute('aria-current', String(Number(button.dataset.index) === index));
-    if (navigate) await Promise.all(this.viewers.map(viewer => viewer.select(item))).catch(this.onError);
+    if (navigate) {
+      try {
+        await Promise.all(this.viewers.map(viewer => viewer.select(item)));
+        await this.onSelect(item, () => selection === this.selection && this.job === job && this.items[this.index] === item);
+      } catch (error) { this.onError(error); }
+    }
   }
 
   /** Убирает устаревшие детали при фильтрации или удалении задания. */
@@ -154,11 +187,11 @@ export class Results {
   /** Очищает все данные результата, не сохраняя историю в браузере. */
   clear() {
     this.generation += 1;
+    this.selection += 1;
     this.job = null;
     this.items = [];
     this.index = -1;
-    document.querySelector('[data-category-filter]').value = '';
-    document.querySelector('[data-status-filter]').value = '';
+    this.resetFilters();
     document.querySelector('[data-differences]').replaceChildren();
     document.querySelector('[data-list-count]').textContent = '0';
     document.querySelector('[data-load-more]').hidden = true;

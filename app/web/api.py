@@ -389,7 +389,7 @@ def create_app(
         job_id: UUID,
         request: Request,
         service: Service,
-        category: str = "",
+        category: Annotated[list[str] | None, Query()] = None,
         status: str = "",
         offset: int = Query(0, ge=0),
         limit: int = Query(200, ge=1, le=500),
@@ -469,17 +469,31 @@ def create_app(
 
     @app.get("/api/v1/comparisons/{job_id}/correspondence/{side}/{page}")
     def correspondence(
-        job_id: UUID, side: Literal["old", "new"], page: int, request: Request, service: Service
+        job_id: UUID,
+        side: Literal["old", "new"],
+        page: int,
+        request: Request,
+        service: Service,
+        difference_id: str = "",
     ):
         """Определяет связанную страницу по совпавшим элементам, без равенства номеров страниц."""
-        return queries.correspondence(read_result(job_id, request, service), side, page)
+        return queries.correspondence(
+            read_result(job_id, request, service), side, page, difference_id
+        )
 
     @app.get("/api/v1/comparisons/{job_id}/report")
-    def report(job_id: UUID, request: Request, service: Service, show_unverified: bool = True):
+    def report(
+        job_id: UUID,
+        request: Request,
+        service: Service,
+        show_unverified: bool = True,
+        category: Annotated[list[str] | None, Query()] = None,
+        status: str = "",
+    ):
         """Скачивает отчёт с выбранной видимостью; права владельца/Telegram-сессии и TTL сохраняются."""
         data = read_result(job_id, request, service)
         projection = queries.comparison_report(
-            data, service.repository.get(str(job_id)), show_unverified
+            data, service.repository.get(str(job_id)), show_unverified, category, status
         )
         return Response(
             service.exporter.report(projection),

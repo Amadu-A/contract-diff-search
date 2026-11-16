@@ -25,7 +25,12 @@ class NormalizedText:
 def normalize(text: str) -> NormalizedText:
     """Убирает технические пробелы и мягкие переносы, сохраняя регистр и знаки."""
     chars, positions = [], []
+    wraps = set()
+    for match in re.finditer(r"(?<=[^\W\d_])-\r?\n\s*(?=[а-яёa-z])", text):
+        wraps.update(range(match.start(), match.end()))
     for i, char in enumerate(text):
+        if i in wraps:
+            continue
         if char == "\u00ad":
             continue
         for value in unicodedata.normalize("NFC", char):
@@ -102,6 +107,19 @@ def comparison_content(text: str, groups: EquivalenceGroups = ()) -> str:
     """Даёт ключ содержимого для сопоставления, игнорируя только настроенные замены и OCR-пробелы."""
     value = content(text)
     return " ".join(t[0] for t in comparison_tokens(value, groups)) if groups else value
+
+
+def requisite_values(text: str) -> dict[str, str]:
+    """Читает целый ИНН/КПП или корреспондентский счёт, не отбрасывая произвольный текст."""
+    value = normalize(text).text.strip(" /,;").casefold()
+    compound = re.fullmatch(r"инн\s*/\s*кпп\s*:?\s*(\d{10}|\d{12})\s*/\s*(\d{9})", value)
+    if compound:
+        return dict(zip(("inn", "kpp"), compound.groups(), strict=True))
+    separate = re.fullmatch(r"инн\s*:?\s*(\d{10}|\d{12})\s*[/,;]?\s*кпп\s*:?\s*(\d{9})", value)
+    if separate:
+        return dict(zip(("inn", "kpp"), separate.groups(), strict=True))
+    account = re.fullmatch(r"(?:кор[.]?\s*сч[её]т|к/с(?:ч[её]т)?)\s*:?\s*(\d{20})", value)
+    return {"correspondent": account[1]} if account else {}
 
 
 def exclusion_value(text: str, groups: EquivalenceGroups) -> bool:

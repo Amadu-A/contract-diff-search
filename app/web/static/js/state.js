@@ -36,3 +36,13 @@ export function isUnverified(item) {
 export function visibleDifference(item, showUnverified = true) {
   return item.active !== false && (showUnverified || !isUnverified(item));
 }
+
+/** Начальный список содержит только содержательные изменения; общая статистика полная. */
+export const defaultCategories = ['number_modified','text_modified','text_added','text_deleted','table_modified'];
+
+/** Общие параметры списка и отчёта сохраняют несколько категорий и видимость предупреждений. */
+export function differenceFilters(categories, status, showUnverified) {
+  const query = new URLSearchParams({status, show_unverified: String(showUnverified)});
+  categories.forEach(category => query.append('category', category));
+  return query;
+}

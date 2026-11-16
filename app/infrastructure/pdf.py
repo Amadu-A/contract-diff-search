@@ -6,7 +6,7 @@ pdfplumber даёт нативные слова и символы. Для рас
 """
 
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from pathlib import Path
 from threading import RLock
@@ -122,6 +122,40 @@ def _native_words(page) -> list[dict]:
     extracted = page.extract_words(
         x_tolerance=2, y_tolerance=3, keep_blank_chars=False, use_text_flow=False, return_chars=True
     )
+    # Транспортная подпись ЭДО не является текстом договора или доказательством /Sig.
+    raw_lines = defaultdict(list)
+    line_top, line_number = -100.0, -1
+    for item in sorted(extracted, key=lambda w: (w["top"], w["x0"])):
+        if item["top"] - line_top > 3:
+            line_number += 1
+            line_top = item["top"]
+        item["native_line"] = line_number
+        raw_lines[line_number].append(item)
+    metadata_top = page.height
+    for items in raw_lines.values():
+        text = " ".join(w["text"] for w in sorted(items, key=lambda w: w["x0"]))
+        if (
+            items[0]["top"] > page.height * 0.55
+            and re.search(r"Идентификатор документа\s+[0-9a-f-]{36}", text)
+            and "СКБ Контур" in " ".join(w["text"] for w in extracted)
+        ):
+            metadata_top = min(metadata_top, items[0]["top"])
+    original_words = extracted
+    extracted = [
+        w
+        for items in raw_lines.values()
+        if items[0]["top"] < metadata_top
+        and not (
+            items[0]["top"] > page.height * 0.94
+            and re.search(
+                r"Передан через Диадок|Страница\s+\d+\s+из\s+\d+|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}",
+                " ".join(w["text"] for w in items),
+            )
+        )
+        for w in items
+    ]
+    technical = {id(w) for w in original_words} - {id(w) for w in extracted}
+    extracted = original_words
     result, last_top, paragraph = [], -100.0, 0
     # Раздельный порядок чтения колонок при устойчивом сквозном центральном пробеле.
     occupancy = np.zeros(max(1, int(page.width) + 1), dtype=int)
@@ -145,30 +179,89 @@ def _native_words(page) -> list[dict]:
         or sum(w["x0"] >= split for w in extracted) < 20
     ):
         split = None
+    column_top = -1
+    # Реквизиты могут занимать две колонки только в нижней части обычной страницы.
+    for items in raw_lines.values():
+        labels = [
+            w
+            for w in items
+            if re.fullmatch(r"(?:Заказчик|Подрядчик|Покупатель|Поставщик):", w["text"])
+        ]
+        if len(labels) == 2 and abs(labels[0]["x0"] - labels[1]["x0"]) > page.width * 0.25:
+            labels.sort(key=lambda w: w["x0"])
+            column_top = min(w["top"] for w in labels)
+            split = labels[1]["x0"] - 8
+            starts = Counter()
+            for row in raw_lines.values():
+                row = sorted(row, key=lambda w: w["x0"])
+                if row[0]["top"] < column_top or row[0]["top"] >= metadata_top:
+                    continue
+                for left, right in zip(row, row[1:], strict=False):
+                    if (
+                        right["x0"] - left["x1"] > 20
+                        and page.width * 0.4 < right["x0"] < page.width * 0.8
+                    ):
+                        starts[round(right["x0"] / 3) * 3] += 1
+            if starts and starts.most_common(1)[0][1] >= 3:
+                split = starts.most_common(1)[0][0] - 2
+            break
+
+    line_splits = {}
+    if column_top >= 0:
+        for number, row in raw_lines.items():
+            row = sorted(row, key=lambda w: w["x0"])
+            if row[0]["top"] < column_top:
+                continue
+            gaps = [
+                (right["x0"] - left["x1"], (right["x0"] + left["x1"]) / 2)
+                for left, right in zip(row, row[1:], strict=False)
+                if page.width * 0.35 < right["x0"] < page.width * 0.75
+            ]
+            if gaps and max(gaps)[0] > 25:
+                line_splits[number] = max(gaps)[1]
+
+    def column(word):
+        """Отделяет полноширинный текст над локальными колонками реквизитов."""
+        if column_top >= 0 and word["top"] < column_top - 2:
+            return -1
+        boundary = line_splits.get(word["native_line"], split)
+        return int(word["x0"] >= boundary) if boundary else 0
+
     ordered = sorted(
         extracted,
-        key=lambda w: (int(w["x0"] >= split) if split else 0, round(w["top"] / 3), w["x0"]),
+        key=lambda w: (column(w), w["native_line"], w["x0"]),
     )
+    margins = {}
+    for word in ordered:
+        margins[column(word)] = min(margins.get(column(word), page.width), word["x0"])
     previous_column = 0
     for word in ordered:
         top = word["top"]
-        column = int(word["x0"] >= split) if split else 0
-        if column != previous_column or top - last_top > max(18, (word["bottom"] - top) * 1.65):
+        col = column(word)
+        new_line = abs(top - last_top) > 3
+        indent = new_line and 12 < word["x0"] - margins[col] < 75
+        if (
+            col != previous_column
+            or indent
+            or top - last_top > max(18, (word["bottom"] - top) * 1.65)
+        ):
             paragraph += 1
         result.append(
             {
                 "text": word["text"],
+                "technical": id(word) in technical,
+                "technical_padding": 30 if top >= metadata_top else 16,
                 "box": (word["x0"], top, word["x1"], word["bottom"]),
                 "confidence": 1.0,
                 "verified": True,
-                "line": (column, round(top / 3)),
+                "line": (col, word["native_line"]),
                 "paragraph": paragraph,
                 "chars": word.get("chars", []),
                 "style": _pdf_style(word.get("chars", [])),
             }
         )
         last_top = top
-        previous_column = column
+        previous_column = col
     return result
 
 
@@ -199,6 +292,8 @@ def _elements_from_pages(pages_words: list[tuple[Page, list[dict]]]) -> list[Doc
     for page, words in pages_words:
         lines = defaultdict(list)
         for word in words:
+            if word.get("technical"):
+                continue
             lines[word["line"]].append(word)
         first_line = True
         for line_words in lines.values():
@@ -218,7 +313,12 @@ def _elements_from_pages(pages_words: list[tuple[Page, list[dict]]]) -> list[Doc
                 and not found
                 and line_words[0]["box"][1] < page.height * 0.18
             )
-            field_label = bool(re.match(r"^[А-ЯЁA-Z][^:.]{1,40}:\s", text))
+            field_label = bool(
+                re.match(
+                    r"^(?:АО |ООО )|^[А-ЯЁA-Z][^:.]{1,40}:\s|^(?:ИНН|КПП|ОГРН|БИК|[рРкК]/с|кор\.\s*сч[её]т|[Ee]-mail)\b",
+                    text,
+                )
+            )
             if (
                 current is None
                 or found
@@ -238,7 +338,7 @@ def _elements_from_pages(pages_words: list[tuple[Page, list[dict]]]) -> list[Doc
                 elements.append(current)
             for item in line_words:
                 if current.text:
-                    current.text += " "
+                    current.text += "\n" if item is line_words[0] else " "
                 start = len(current.text)
                 current.text += item["text"]
                 if item.get("style"):
@@ -538,7 +638,7 @@ class PdfDocumentExtractor:
                 source = self.office.convert(path, output / "import", "docx", checkpoint)
             accepted = output / "accepted.docx"
             prepare_docx(source, accepted, self.settings)
-            logical = read_docx(accepted)
+            logical = read_docx(accepted, split_fields=True)
             source = self.office.convert(accepted, output / "render", "pdf", checkpoint)
         pdf = output / "preview.pdf"
         canonical_pdf(source, pdf, self.settings.max_pages)
@@ -573,6 +673,13 @@ class PdfDocumentExtractor:
                             min(reduced.height, int(y1 * reduced.height / height) + 3),
                         )
                         uncovered[ya:yb, xa:xb] = False
+                    transport = [
+                        w["box"][1] - w.get("technical_padding", 16)
+                        for w in words
+                        if w.get("technical")
+                    ]
+                    if transport:
+                        uncovered[max(0, int(min(transport) * reduced.height / height)) :] = False
                     uncovered_ratio = float(uncovered.sum()) / max(1, int(ink.sum()))
                     reduced.close()
                     insufficient_layer = bool(
@@ -668,6 +775,18 @@ class PdfDocumentExtractor:
                                     str(target),
                                 )
                             )
+                    transport = [
+                        w["box"][1] - w.get("technical_padding", 16)
+                        for w in words
+                        if w.get("technical")
+                    ]
+                    if transport:
+                        # Удаляется только графика внутри доказанной служебной полосы ЭДО.
+                        graphics[:] = [
+                            g
+                            for g in graphics
+                            if g.region.page != index or g.region.y0 < min(transport)
+                        ]
                     page.close()
                 finally:
                     image.close()

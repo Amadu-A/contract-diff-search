@@ -12,6 +12,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -213,7 +214,7 @@ def _properties(node) -> dict[str, str]:
     return result
 
 
-def read_docx(path: Path) -> list[DocumentElement]:
+def read_docx(path: Path, split_fields: bool = False) -> list[DocumentElement]:
     """Читает абзацы в порядке OOXML, вложенные таблицы, примечания и колонтитулы."""
     result, section = [], ""
     with ZipFile(path) as archive:
@@ -293,7 +294,7 @@ def read_docx(path: Path) -> list[DocumentElement]:
                         text += value
                 if not text.strip():
                     continue
-                number = SECTION.match(text)
+                number = SECTION.match(text.lstrip())
                 if number:
                     section = number.group(1)
                 cell = next(paragraph.iterancestors(tag("tc")), None)
@@ -346,6 +347,50 @@ def read_docx(path: Path) -> list[DocumentElement]:
                         runs=runs,
                     )
                 )
+    if split_fields:
+        segmented = []
+        for element in result:
+            if re.fullmatch(r"\d{1,3}", element.text.strip()) and re.match(
+                r"word/(?:footer|header)", element.attributes["part"]
+            ):
+                continue
+            starts = [0]
+            if element.kind == "cell":
+                starts += [
+                    m.start()
+                    for m in re.finditer(
+                        r"(?<!\w)(?:ИНН|КПП|ОГРН|БИК|р/с|кор\.\s*сч[её]т|[Ee]-mail)\b", element.text
+                    )
+                    if m.start()
+                ]
+            for start, end in zip(starts, [*starts[1:], len(element.text)], strict=True):
+                text = element.text[start:end]
+                if not text.strip(" /,\n"):
+                    continue
+                attrs = element.attributes | {"text_offset": str(start)}
+                links = attrs.get("hyperlinks", "").splitlines()
+                if links and all(
+                    link.startswith("mailto:") and link[7:] in element.text for link in links
+                ):
+                    attrs["hyperlinks"] = "\n".join(link for link in links if link[7:] in text)
+                segmented.append(
+                    replace(
+                        element,
+                        id=f"E{len(segmented):06d}",
+                        text=text,
+                        attributes=attrs,
+                        runs=[
+                            replace(
+                                run,
+                                start=max(run.start, start) - start,
+                                end=min(run.end, end) - start,
+                            )
+                            for run in element.runs
+                            if run.end > start and run.start < end
+                        ],
+                    )
+                )
+        return segmented
     return result
 
 

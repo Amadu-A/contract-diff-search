@@ -282,8 +282,8 @@ def test_real_contract_ocr_targets_1_2_and_10_2(settings, extractor, tmp_path):
     from app.bootstrap import load_exclusions
     from app.settings import ROOT
 
-    source = next((ROOT / "examples").glob("*.docx"), None)
-    scanned = next((ROOT / "examples").glob("*.pdf"), None)
+    source = next((ROOT / "examples").glob("Договор_поставки*.docx"), None)
+    scanned = next((ROOT / "examples").glob("Договор_поставки*.pdf"), None)
     if not source or not scanned:
         pytest.skip("Реальные договоры отсутствуют в examples")
     hashes = [hashlib.sha256(p.read_bytes()).hexdigest() for p in (source, scanned)]
@@ -375,3 +375,48 @@ def test_word_export_is_real_and_keeps_layout(settings, extractor, tmp_path):
         e.text for e in read_docx(tmp_path / "old/accepted.docx")
     ]
     assert a.read_bytes() == original_hash
+
+
+def test_native_local_columns_and_transport_footer_preserve_real_graphic(
+    settings, extractor, tmp_path
+):
+    """Центрированные заголовки не смешивают реквизиты; QR/рамка ЭДО не становятся печатью."""
+    from tests.factories import font
+
+    source = tmp_path / "columns.pdf"
+    writer = canvas.Canvas(str(source), pagesize=(600, 850))
+    writer.setFont(font(), 10)
+    writer.drawString(55, 700, "9. Реквизиты сторон")
+    writer.drawString(110, 560, "Заказчик:")
+    writer.drawString(410, 560, "Подрядчик:")
+    for x, number in ((55, "1111111111"), (317, "2222222222")):
+        for y, text in (
+            (535, "ООО «Пример»"),
+            (515, "Адрес: Москва"),
+            (495, "ИНН " + number),
+            (475, "ОГРН " + number + "333"),
+            (455, "БИК 044525000"),
+            (435, "E-mail: example@example.test"),
+        ):
+            writer.drawString(x, y, text)
+    writer.setStrokeColorRGB(0, 0, 0.8)
+    writer.circle(180, 650, 18)
+    writer.rect(25, 90, 550, 160)
+    writer.rect(530, 205, 35, 35)
+    writer.setFillColorRGB(0, 0, 0)
+    writer.drawString(35, 225, "Идентификатор документа 11111111-2222-3333-4444-555555555555")
+    writer.drawString(35, 200, "Документ передан через оператора ЭДО СКБ Контур")
+    writer.save()
+    document = extractor.extract(
+        source, "columns.pdf", tmp_path / "extracted", False, lambda _: None
+    )
+    assert all(p.mode == "text" for p in document.pages)
+    text = " ".join(e.text for e in document.elements)
+    assert "Идентификатор" not in text and "оператора" not in text
+    for number, column in (("1111111111", "0"), ("2222222222", "1")):
+        element = next(
+            e for e in document.elements if e.text.startswith("ИНН") and number in e.text
+        )
+        assert element.attributes["column"] == column
+        assert not any(other in element.text for other in {"1111111111", "2222222222"} - {number})
+    assert document.graphics and all(g.region.y0 < 570 for g in document.graphics)

@@ -55,13 +55,29 @@ function event(message) {
 async function synchronize(side, page) {
   if (!sync || !currentJob) return;
   try {
-    const mapping = await apiRequest(jobUrl(currentJob.id, `/correspondence/${side}/${page}`));
+    const job = currentJob.id;
+    const own = viewers.find(viewer => viewer.side === side);
+    const sequence = own.sequence;
+    const mapping = await apiRequest(jobUrl(job, `/correspondence/${side}/${page}`));
+    if (!sync || currentJob?.id !== job || own.sequence !== sequence) return;
     if (mapping.page) await viewers.find(viewer => viewer.side !== side).go(mapping.page);
+    else showError(new Error('Соответствие страницы не установлено. Выберите страницу второй редакции вручную.'));
   } catch (error) { showError(error); }
 }
 
 const viewers = [...document.querySelectorAll('[data-viewer]')].map(root => new Viewer(root, synchronize, showError));
-const results = new Results(viewers, showError);
+const results = new Results(viewers, showError, async (item, current) => {
+  if (!sync || !currentJob) return;
+  const side = item.old_regions.length ? 'old' : item.new_regions.length ? 'new' : null;
+  if (!side) return;
+  const other = side === 'old' ? 'new' : 'old';
+  if (item[`${other}_regions`].length) return;
+  const sequences = viewers.map(viewer => viewer.sequence);
+  const mapping = await apiRequest(jobUrl(currentJob.id, `/correspondence/${side}/${item[`${side}_regions`][0].page}?difference_id=${encodeURIComponent(item.id)}`));
+  if (!sync || !current() || viewers.some((viewer, index) => viewer.sequence !== sequences[index])) return;
+  if (mapping.page) await viewers.find(viewer => viewer.side === other).go(mapping.page);
+  else showError(new Error('Не удалось установить соответствующую страницу второй редакции. Выберите её вручную.'));
+});
 const aiProgress = new AIProgress(showError, retryAI, readOnly);
 document.querySelector('[data-show-unverified-toggle]').addEventListener('change', event => results.setVisibility(event.target.checked).catch(showError));
 
@@ -78,7 +94,7 @@ async function displayResult(job, run, quiet = false) {
   }
   await results.setResult(job.id, summary, quiet);
   if (run !== generation) return;
-  reportDownload.href = jobUrl(job.id, `/report?show_unverified=${results.showUnverified}`);
+  reportDownload.href = jobUrl(job.id, `/report?${results.filters()}`);
   reportDownload.removeAttribute('aria-disabled');
   aiProgress.update(job, summary.ai_progress, summary.verification_metrics);
   document.querySelector('[data-delete]').hidden = readOnly;
