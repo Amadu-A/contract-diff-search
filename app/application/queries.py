@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from app.domain.comparison import statistics
 from app.domain.models import TERMINAL, Difference, JobStatus
+from app.domain.text import comparison_tokens
 from app.domain.visibility import is_unverified, visible
 
 
@@ -232,11 +233,77 @@ def ai_operations(data: dict, offset: int, limit: int) -> dict:
     }
 
 
+def _nearby_word_page(element, partners, span, exclusions):
+    """Ищет уникальные соседние тройки слов внутри уже сопоставленного блока."""
+    if not span:
+        return None
+    exclusions = (
+        (tuple(exclusions),)
+        if exclusions and isinstance(exclusions[0], str)
+        else tuple(tuple(group) for group in exclusions)
+    )
+
+    def located_tokens(elements):
+        """Связывает поисковые токены с настоящими проверенными страницами слов."""
+        result = []
+        for item in elements:
+            for text, start, end in comparison_tokens(item["text"], exclusions):
+                pages = {
+                    w["region"]["page"]
+                    for w in item["words"]
+                    if w["end"] > start
+                    and w["start"] < end
+                    and w.get("verified", True)
+                    and w.get("confidence", 1) >= 0.65
+                }
+                result.append((text, start, end, next(iter(pages)) if len(pages) == 1 else None))
+        return result
+
+    source = located_tokens([element])
+    target = located_tokens(partners)
+    source_values = [t[0] for t in source]
+    target_values = [t[0] for t in target]
+    before = sum(t[2] <= span[0] for t in source)
+    after = next((i for i, t in enumerate(source) if t[1] >= span[1]), len(source))
+    anchors = []
+    for boundary, direction in ((before, -1), (after, 1)):
+        for distance in range(8):
+            start = boundary - 3 - distance if direction < 0 else boundary + distance
+            if start < 0 or start + 3 > len(source):
+                break
+            needle = source_values[start : start + 3]
+            if sum(any(c.isalnum() for c in token) for token in needle) < 2:
+                continue
+            own = [i for i in range(len(source) - 2) if source_values[i : i + 3] == needle]
+            hits = [i for i in range(len(target) - 2) if target_values[i : i + 3] == needle]
+            if (
+                len(own) != 1
+                or len(hits) != 1
+                or any(t[3] is None for t in source[start : start + 3])
+            ):
+                continue
+            pages = {t[3] for t in target[hits[0] : hits[0] + 3]}
+            if len(pages) == 1 and None not in pages:
+                anchors.append(next(iter(pages)))
+                break
+    return anchors[0] if anchors and len(set(anchors)) == 1 else None
+
+
 def correspondence(data: dict, side: str, page: int, difference_id: str = "") -> dict:
     """Выбирает связанную страницу по голосам сопоставленных элементов; ничью не угадывает."""
     other = "new" if side == "old" else "old"
     own = {e["id"]: e for e in data[side]["elements"]}
     partner = {e["id"]: e for e in data[other]["elements"]}
+
+    def reliable(match):
+        """Различает качество текстового сходства и однозначную структурную привязку пункта."""
+        if match.get("confidence", 0) >= 0.65:
+            return True
+        if len(match[side]) == len(match[other]) == 1:
+            left, right = own.get(match[side][0]), partner.get(match[other][0])
+            return bool(left and right and left["section"] and left["section"] == right["section"])
+        return False
+
     if difference_id:
         difference = next((d for d in data["differences"] if d["id"] == difference_id), None)
         identifier = difference.get(side + "_element") if difference else None
@@ -246,9 +313,24 @@ def correspondence(data: dict, side: str, page: int, difference_id: str = "") ->
             return {"page": None, "method": "missing_anchor"}
         positions = {key: i for i, key in enumerate(own)}
         origin = positions[identifier]
+        for match in data["matches"]:
+            if identifier not in match[side]:
+                continue
+            partners = [partner[key] for key in match[other] if key in partner]
+            selected = _nearby_word_page(
+                own[identifier],
+                partners,
+                difference.get(side + "_range"),
+                data.get("comparison_exclusions", []),
+            )
+            if selected:
+                return {"page": selected, "method": "matched_words"}
+            pages = {w["region"]["page"] for e in partners for w in e["words"]}
+            if reliable(match) and len(pages) == 1:
+                return {"page": next(iter(pages)), "method": "matched_element"}
         neighbors = []
         for match in data["matches"]:
-            if match.get("source") == "ai" or match.get("confidence", 0) < 0.65:
+            if match.get("source") == "ai" or not reliable(match):
                 continue
             indices = [positions[key] for key in match[side] if key in positions]
             if not indices or min(indices) <= origin <= max(indices):
@@ -266,6 +348,11 @@ def correspondence(data: dict, side: str, page: int, difference_id: str = "") ->
                     abs(origin - index),
                     max(target_pages) if before else min(target_pages),
                     own[match[side][0]]["section"] == own[identifier]["section"],
+                    any(
+                        w["region"]["page"] == page
+                        for key in match[side]
+                        for w in own[key]["words"]
+                    ),
                 )
             )
         nearest = [
@@ -275,7 +362,7 @@ def correspondence(data: dict, side: str, page: int, difference_id: str = "") ->
         anchors = [n for n in nearest if n]
         if len(anchors) == 2 and anchors[0][2] == anchors[1][2]:
             return {"page": anchors[0][2], "method": "neighbor_anchors"}
-        if len(anchors) == 1 and anchors[0][1] <= 2 and anchors[0][3]:
+        if len(anchors) == 1 and anchors[0][3] and anchors[0][4]:
             return {"page": anchors[0][2], "method": "section_anchor"}
         return {"page": None, "method": "ambiguous"}
     votes = Counter()

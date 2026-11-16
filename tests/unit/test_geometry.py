@@ -89,3 +89,71 @@ def test_graphic_without_text_id_uses_existing_page_correspondence():
     assert correspondence(data, "new", 1, "G")["page"] == 1
     assert not result.differences[-1].old_regions
     assert correspondence(data, "new", 1, "unknown")["page"] is None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_inline_addition_uses_matching_clause_before_remote_neighbors(reverse):
+    """Вставка внутри пункта использует его страницу, даже если соседний пункт на другой."""
+    from dataclasses import asdict, replace
+
+    from app.application.queries import correspondence
+
+    old = version(
+        [
+            "1. До основного раздела",
+            "2. Подрядчик передает продукцию после полного согласования условий договора.",
+            "3. После основного раздела",
+        ]
+    )
+    new = version(
+        [
+            old.elements[0].text,
+            old.elements[1].text.replace("продукцию", "новую качественную продукцию"),
+            old.elements[2].text,
+        ],
+        "pdf",
+    )
+    for doc, pages in ((old, [5, 6, 7]), (new, [2, 4, 4])):
+        for e, page in zip(doc.elements, pages, strict=True):
+            e.words = [replace(w, region=replace(w.region, page=page)) for w in e.words]
+    if reverse:
+        old, new = new, old
+    result = compare(old, new)
+    difference = next(
+        d for d in result.differences if d.category == ("text_deleted" if reverse else "text_added")
+    )
+    for m in result.matches:
+        if difference.new_element in m.new:
+            m.confidence = 0.5
+    side = "old" if reverse else "new"
+    mapping = correspondence(asdict(result), side, 4, difference.id)
+    assert mapping["page"] == 6
+    assert not difference.new_regions if reverse else not difference.old_regions
+
+
+def test_inline_addition_in_multipage_clause_uses_unique_nearby_words():
+    """Номера страниц внутри длинного пункта определяются по словам рядом с вставкой."""
+    from dataclasses import asdict, replace
+
+    from app.application.queries import correspondence
+
+    old = version(
+        [
+            "2. Согласование проекта выполняется заказчиком. Подрядчик передает готовую продукцию после подписания полного акта приемки работ."
+        ]
+    )
+    new = version([old.elements[0].text.replace("приемки", "окончательной приемки")], "pdf")
+    old.elements[0].words = [
+        replace(w, region=replace(w.region, page=5 if w.start < 50 else 6))
+        for w in old.elements[0].words
+    ]
+    new.elements[0].words = [
+        replace(w, region=replace(w.region, page=4)) for w in new.elements[0].words
+    ]
+    result = compare(old, new)
+    addition = next(d for d in result.differences if d.category == "text_added")
+    assert correspondence(asdict(result), "new", 4, addition.id) == {
+        "page": 6,
+        "method": "matched_words",
+    }
+    assert addition.old_regions == []

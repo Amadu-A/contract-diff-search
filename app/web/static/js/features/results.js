@@ -143,7 +143,7 @@ export class Results {
   async select(index, navigate = true) {
     if (index < 0 || index >= this.items.length) return;
     this.index = index;
-    const selection = ++this.selection;
+    const selection = navigate ? ++this.selection : this.selection;
     const job = this.job;
     const item = this.items[index];
     document.querySelector('[data-detail-empty]').hidden = true;
@@ -168,8 +168,10 @@ export class Results {
     for (const button of document.querySelectorAll('[data-index]')) button.setAttribute('aria-current', String(Number(button.dataset.index) === index));
     if (navigate) {
       try {
-        await Promise.all(this.viewers.map(viewer => viewer.select(item)));
-        await this.onSelect(item, () => selection === this.selection && this.job === job && this.items[this.index] === item);
+        await Promise.all([
+          ...this.viewers.map(viewer => viewer.select(item)),
+          this.onSelect(item, () => selection === this.selection && this.job === job && this.items[this.index]?.id === item.id),
+        ]);
       } catch (error) { this.onError(error); }
     }
   }

@@ -67,14 +67,16 @@ async function synchronize(side, page) {
 
 const viewers = [...document.querySelectorAll('[data-viewer]')].map(root => new Viewer(root, synchronize, showError));
 const results = new Results(viewers, showError, async (item, current) => {
-  if (!sync || !currentJob) return;
+  if (!sync || !currentJob || !current()) return;
+  const job = currentJob.id;
   const side = item.old_regions.length ? 'old' : item.new_regions.length ? 'new' : null;
   if (!side) return;
   const other = side === 'old' ? 'new' : 'old';
   if (item[`${other}_regions`].length) return;
   const sequences = viewers.map(viewer => viewer.sequence);
-  const mapping = await apiRequest(jobUrl(currentJob.id, `/correspondence/${side}/${item[`${side}_regions`][0].page}?difference_id=${encodeURIComponent(item.id)}`));
-  if (!sync || !current() || viewers.some((viewer, index) => viewer.sequence !== sequences[index])) return;
+  // Запрос начинается параллельно с загрузкой страниц и не зависит от img.decode().
+  const mapping = await apiRequest(jobUrl(job, `/correspondence/${side}/${item[`${side}_regions`][0].page}?difference_id=${encodeURIComponent(item.id)}`));
+  if (!sync || currentJob?.id !== job || !current() || viewers.some((viewer, index) => viewer.sequence !== sequences[index])) return;
   if (mapping.page) await viewers.find(viewer => viewer.side === other).go(mapping.page);
   else showError(new Error('Не удалось установить соответствующую страницу второй редакции. Выберите её вручную.'));
 });

@@ -6,10 +6,11 @@ import json
 import re
 from collections import Counter
 from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 
-from app.application.queries import correspondence
+from app.application.queries import comparison_report, correspondence
 from app.bootstrap import load_exclusions
 from app.domain.comparison import compare
 from app.infrastructure.exports import DocumentExporter
@@ -68,10 +69,52 @@ def scenario_rows(matrix, result):
     return rows
 
 
+def assert_unchanged_fragment(result, control):
+    """Проверяет реальные диапазоны общего текста, а не только его присутствие в редакциях."""
+    pattern = re.compile(r"\s+".join(re.escape(part) for part in control["value"].split()))
+    located = {}
+    for side in ("old", "new"):
+        found = [
+            (e, m)
+            for e in getattr(result, side).elements
+            if e.section == control[side + "_clause"]
+            for m in pattern.finditer(e.text)
+        ]
+        assert len(found) == 1, (control["id"], side)
+        element, span = found[0]
+        assert any(
+            w.region.page == control[side + "_page"]
+            for w in element.words
+            if w.end > span.start() and w.start < span.end()
+        )
+        located[side] = element.id
+        for difference in result.differences:
+            if not difference.active or getattr(difference, side + "_element") != element.id:
+                continue
+            if difference.category not in {
+                "text_added",
+                "text_deleted",
+                "text_modified",
+                "number_modified",
+                "text_moved",
+            }:
+                continue
+            changed = getattr(difference, side + "_range")
+            assert changed and (changed[1] <= span.start() or changed[0] >= span.end()), (
+                control["id"],
+                difference,
+            )
+    mapped = [m for m in result.matches if located["old"] in m.old and located["new"] in m.new]
+    assert mapped, control["id"]
+    if control["kind"] == "split_merge":
+        assert any(len(m.old) > 1 or len(m.new) > 1 for m in mapped)
+    return pattern
+
+
 @pytest.mark.real
 @pytest.mark.integration
 def test_advertising_contract_matrix_and_all_exports(settings, tmp_path):
-    """Реальные адаптеры сохраняют 41 сценарий, 13 контролей, исходники и редактируемый Word."""
+    """Реальные адаптеры сохраняют 41 сценарий, 15 контролей, исходники и редактируемый Word."""
     paths = [ROOT / "examples" / name for name in ("old.docx", "new.pdf", "expected_matrix.json")]
     if not all(p.is_file() for p in paths):
         pytest.skip("Приватная пара old.docx/new.pdf и её матрица отсутствуют")
@@ -92,6 +135,11 @@ def test_advertising_contract_matrix_and_all_exports(settings, tmp_path):
     assert (len(old.pages), len(new.pages)) == (6, 4)
     assert not any(d.category == "formatting_changed" for d in result.differences)
     matrix = json.loads(paths[2].read_text(encoding="utf8"))
+    assert len(matrix["changes"]) == 41
+    assert {"C14", "C15"} <= {control["id"] for control in matrix["unchanged_controls"]}, (
+        "Обновите локальную expected_matrix.json: нужны C14/C15"
+    )
+    assert matrix["summary"]["controls"] == len(matrix["unchanged_controls"]) == 15
     rows = scenario_rows(matrix, result)
     output = ROOT / ".cache/advertising-verified"
     output.mkdir(parents=True, exist_ok=True)
@@ -109,6 +157,9 @@ def test_advertising_contract_matrix_and_all_exports(settings, tmp_path):
         assert before in " ".join(d.old_text for d in found)
         assert after in " ".join(d.new_text for d in found)
     for control in matrix["unchanged_controls"]:
+        if control["id"] in {"C14", "C15"}:
+            assert_unchanged_fragment(result, control)
+            continue
         contexts = {}
         for side, doc in (("old", old), ("new", new)):
             sections = control[side + "_clause"].split(" / ")
@@ -140,14 +191,60 @@ def test_advertising_contract_matrix_and_all_exports(settings, tmp_path):
                     for d in result.differences
                     if d.category in {"text_added", "text_deleted", "number_modified"}
                 )
+    import io
+    from types import SimpleNamespace
+
+    from pypdf import PdfReader
+
+    projection = comparison_report(
+        asdict(result), SimpleNamespace(ai_full=False, ai_unverified=False)
+    )
+    report = DocumentExporter(None).report(projection)
+    report_text = " ".join(p.extract_text() for p in PdfReader(io.BytesIO(report)).pages)
+    preamble = next(c for c in matrix["unchanged_controls"] if c["id"] == "C14")
+    assert not re.search(
+        r"\s+".join(re.escape(part) for part in preamble["value"].split()), report_text
+    )
     assert not new.graphics
     assert not any("Диадок" in d.old_text + d.new_text for d in result.differences)
     deleted = next(
         d for d in result.differences if d.category == "text_deleted" and d.old_section == "8.5"
     )
     assert correspondence(asdict(result), "old", 6, deleted.id)["page"] == 4
+    data = asdict(result)
+    for difference in result.differences:
+        if not difference.active or difference.category not in {"text_added", "text_deleted"}:
+            continue
+        side = "new" if difference.category == "text_added" else "old"
+        areas = getattr(difference, side + "_regions")
+        if areas:
+            target = correspondence(data, side, areas[0].page, difference.id)
+            other = "old" if side == "new" else "new"
+            assert target["page"] and 1 <= target["page"] <= len(getattr(result, other).pages), (
+                difference.id,
+                target,
+            )
     artifacts = DocumentExporter(LibreOffice(settings)).export(result, tmp_path, lambda _: None)
     assert all(e.path for side in artifacts.values() for e in side)
     word = next(e for e in artifacts["old"] if e.format == "docx")
     assert word.marked_changes > 0
+    from zipfile import ZipFile
+
+    from lxml import etree
+
+    shades = []
+    for path in (tmp_path / "old/accepted.docx", Path(word.path)):
+        with ZipFile(path) as archive:
+            root = etree.fromstring(archive.read("word/document.xml"))
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        paragraph = next(
+            p
+            for p in root.findall(".//w:p", ns)
+            if re.search(
+                r"\s+".join(re.escape(part) for part in preamble["value"].split()),
+                "".join(p.itertext()),
+            )
+        )
+        shades.append([etree.tostring(node) for node in paragraph.findall(".//w:shd", ns)])
+    assert shades[0] == shades[1], "Общая преамбула не должна получать заливку DOCX"
     assert all(hashlib.sha256(p.read_bytes()).hexdigest() == digest for p, digest in hashes.items())

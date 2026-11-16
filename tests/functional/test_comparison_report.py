@@ -408,3 +408,32 @@ def test_multiple_categories_filter_list_and_report_without_mutation(client, ser
         assert marker not in text
     assert service.storage.read_result(job_id) == saved
     assert client.get(base + "/differences?category=number_modified").json()["total"] == 1
+
+
+def test_merged_preamble_has_no_false_rows_statistics_or_highlights(client, service, tmp_path):
+    """Сохранённое групповое соответствие убирает ложную преамбулу из всех GET-проекций."""
+    from tests.factories import version
+    from tests.fakes import FakeExtractor
+    from tests.regression.test_preamble import COMMON, INTRO, REORDERED
+
+    old = version(["Договор сторон", INTRO, COMMON, "1. Предмет договора"])
+    new = version(["Договор сторон", REORDERED + " " + COMMON, "1. Предмет договора"], "pdf")
+    service.extractor = FakeExtractor(old, new)
+    job_id = report_job(client, service, tmp_path)
+    base = f"/api/v1/comparisons/{job_id}"
+    before = service.extractor.calls
+    data = client.get(base + "/differences").json()
+    assert not any(COMMON in d["old_text"] + d["new_text"] for d in data["items"])
+    from app.domain.comparison import compare, statistics
+
+    baseline = statistics(compare(version([INTRO]), version([REORDERED], "pdf")).differences)
+    actual = client.get(base + "/result").json()["statistics"]
+    assert {key: actual[key] for key in ("total", "added", "deleted")} == {
+        key: baseline[key] for key in ("total", "added", "deleted")
+    }
+    assert client.get(base + "/regions/old/3").json()["items"] == []
+    response = client.get(base + "/report")
+    assert response.status_code == 200
+    text = " ".join(p.extract_text() for p in PdfReader(io.BytesIO(response.content)).pages)
+    assert "совместно именуемые" not in text
+    assert service.extractor.calls == before

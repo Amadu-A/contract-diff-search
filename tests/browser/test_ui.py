@@ -713,6 +713,11 @@ def test_real_six_to_four_pages_selection_and_filters(live_server, browser_page,
     expect(page.locator("[data-viewer=old] [data-export-word]")).to_be_visible()
     expect(page.locator("[data-viewer=new] [data-export-word]")).to_be_hidden()
     page.locator("[data-filter-toggle]").click()
+    choose_categories(page, "text_added")
+    page.locator("[data-differences] button").filter(has_text="Пункт 6.3 —").first.click()
+    expect(page.locator("[data-viewer=old] [data-page-number]")).to_have_value("4")
+    expect(page.locator("[data-viewer=new] [data-page-number]")).to_have_value("3")
+    expect(page.locator("[data-viewer=old] .viewer__region--selected")).to_have_count(0)
     choose_categories(page, "text_deleted")
     page.locator("[data-differences] button").filter(has_text="Пункт 8.5 —").first.click()
     expect(page.locator("[data-viewer=old] [data-page-number]")).to_have_value("6")
@@ -727,3 +732,85 @@ def test_real_six_to_four_pages_selection_and_filters(live_server, browser_page,
     output = ROOT / ".cache/advertising-verified"
     output.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(output / "ui-6-to-4.png"), full_page=True)
+
+
+@pytest.mark.parametrize("category", ["text_added", "text_deleted"])
+def test_both_viewers_navigate_while_selected_image_is_pending(
+    live_server, browser_page, tmp_path, category
+):
+    """Ожидание растра выбранной стороны не блокирует /correspondence и вторую панель."""
+    from playwright.sync_api import expect
+
+    from app.domain.models import Page
+    from tests.factories import docx, version
+    from tests.fakes import FakeExtractor
+
+    old = version(
+        [
+            "8.1. Предыдущий неизменный пункт договора.",
+            "8.2. Подрядчик возмещает расходы при отмене заказа.",
+            "8.3. Следующий неизменный пункт договора.",
+        ],
+        "docx",
+    )
+    new = version(
+        [
+            old.elements[0].text,
+            "8.4. Покупатель самостоятельно организует перевозку продукции.",
+            old.elements[2].text,
+        ],
+        "pdf",
+    )
+    for document, count in ((old, 6), (new, 4)):
+        document.pages = [Page(i, 600, 850, "text", 1) for i in range(1, count + 1)]
+        for element in document.elements:
+            element.words = [
+                replace(w, region=replace(w.region, page=count)) for w in element.words
+            ]
+        document.pdf = str(pdf(tmp_path / f"preview-{count}.pdf", ["Navigation"], pages=count))
+    url, service = live_server
+    service.extractor = FakeExtractor(old, new)
+    page = browser_page
+    page.goto(url)
+    upload_old = docx(tmp_path / "our.docx", ["Navigation"])
+    page.locator("[data-upload=old] [data-file-input]").set_input_files(str(upload_old))
+    page.locator("[data-upload=new] [data-file-input]").set_input_files(new.pdf)
+    page.locator("[data-start]").click()
+    expect(page.locator("[data-stage]")).to_contain_text("Сравнение завершено", timeout=60000)
+    page.locator("[data-filter-toggle]").click()
+    choose_categories(page, category)
+    expect(page.locator("[data-list-count]")).to_have_text("1")
+    page.locator("[data-sync]").click()
+    for side in ("old", "new"):
+        control = page.locator(f"[data-viewer={side}] [data-page-number]")
+        control.fill("1")
+        control.press("Enter")
+        expect(control).to_have_value("1")
+    page.locator("[data-sync]").click()
+    side = "new" if category == "text_added" else "old"
+    count = 4 if side == "new" else 6
+    held = []
+    page.route(f"**/pages/{side}/{count}?*", lambda route: held.append(route))
+    try:
+        with page.expect_request(
+            lambda request: "/correspondence/" in request.url and "difference_id=" in request.url
+        ):
+            page.locator("[data-differences] button").click()
+        expect(page.locator("[data-viewer=old] [data-page-number]")).to_have_value("6")
+        expect(page.locator("[data-viewer=new] [data-page-number]")).to_have_value("4")
+        assert held
+        page.wait_for_function(
+            "side => !document.querySelector(`[data-viewer=${side}] [data-page-image]`).complete",
+            arg=side,
+        )
+    finally:
+        for route in held:
+            route.continue_()
+        page.unroute(f"**/pages/{side}/{count}?*")
+    page.locator("[data-sync]").click()
+    missing = "old" if side == "new" else "new"
+    control = page.locator(f"[data-viewer={missing}] [data-page-number]")
+    control.fill("1")
+    control.press("Enter")
+    page.locator("[data-differences] button").click()
+    expect(control).to_have_value("1")

@@ -278,6 +278,8 @@ def compare(
         changes = []
         if len(match.old) > 1 or len(match.new) > 1:
             left, right = [oa[i] for i in match.old], [nb[i] for i in match.new]
+            # Общая часть объединённого блока проходит тот же diff; события на весь
+            # абзац не создаются из-за того, что изменилось только его окружение.
             changes.extend(
                 _group_differences(
                     left,

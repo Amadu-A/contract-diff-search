@@ -82,6 +82,8 @@ def match_elements(
     def compatible(i, j):
         """Не переносит одинаковый номер/слово между разными пунктами или сторонами таблицы."""
         left, right = old[i], new[j]
+        if bool(left.section) != bool(right.section):
+            return False
         if (
             "cell" in {left.kind, right.kind}
             and "column" in left.attributes
@@ -197,6 +199,13 @@ def match_elements(
         (old, new, used_a, used_b, False),
         (new, old, used_b, used_a, True),
     ):
+        bounds = [(y, x) if reverse else (x, y) for x, y in anchors]
+        windows = [(-1, -1), *bounds, (len(left), len(right))]
+        scope = {
+            i: (start + 1, end)
+            for (lo, start), (hi, end) in zip(windows, windows[1:], strict=False)
+            for i in range(lo + 1, hi)
+        }
         grouped = defaultdict(list)
         for j in range(len(right)):
             for count in range(2, 13):
@@ -218,6 +227,9 @@ def match_elements(
                 (j, count)
                 for j, count in grouped.get(expected, [])
                 if not any(j + k in occupied_r for k in range(count))
+                and scope[i][0] <= j
+                and j + count <= scope[i][1]
+                and bool(element.section) == bool(right[j].section)
             ]
             if len(candidates) == 1:
                 j, count = candidates[0]
@@ -232,6 +244,100 @@ def match_elements(
                 )
                 occupied_l.add(i)
                 occupied_r.update(range(j, j + count))
+
+        # Общий абзац может быть хвостом изменённого блока, в том числе в преамбуле.
+        # Ищем группу в том же опорном окне, а не одинаковую фразу в другом разделе.
+        keys_l, keys_r = (b, a) if reverse else (a, b)
+        bounds = [(y, x) if reverse else (x, y) for x, y in anchors]
+        windows = [(-1, -1), *bounds, (len(left), len(right))]
+        token_l = [tuple(t[0] for t in tokens(value)) for value in keys_l]
+        token_r = [tuple(t[0] for t in tokens(value)) for value in keys_r]
+        for (lo, start), (hi, end) in zip(windows, windows[1:], strict=False):
+            for i in range(lo + 1, hi):
+                element = left[i]
+                if i in occupied_l or len(token_l[i]) < 8:
+                    continue
+                expected = " " + " ".join(token_l[i]) + " "
+                contained = [
+                    j
+                    for j in range(start + 1, end)
+                    if j not in occupied_r
+                    and right[j].section == element.section
+                    and len(token_r[j]) >= 5
+                    and expected.count(" " + " ".join(token_r[j]) + " ") == 1
+                ]
+                candidates = {}
+                target = Counter(token_l[i])
+                for pivot in contained:
+                    for j in range(max(start + 1, pivot - 11), pivot + 1):
+                        group_tokens = []
+                        for stop in range(j, min(end, j + 12)):
+                            other = right[stop]
+                            if (
+                                stop in occupied_r
+                                or other.section != element.section
+                                or (
+                                    "cell" in {element.kind, other.kind}
+                                    and "column" in element.attributes
+                                    and "column" in other.attributes
+                                    and element.attributes["column"] != other.attributes["column"]
+                                )
+                            ):
+                                break
+                            group_tokens.extend(token_r[stop])
+                            if stop < pivot or stop == j:
+                                continue
+                            score = (
+                                2
+                                * sum((target & Counter(group_tokens)).values())
+                                / max(1, len(token_l[i]) + len(group_tokens))
+                            )
+                            single = max(
+                                2
+                                * sum((target & Counter(token_r[k])).values())
+                                / max(1, len(token_l[i]) + len(token_r[k]))
+                                for k in range(j, stop + 1)
+                            )
+                            if score >= 0.75 and score >= single + 0.1:
+                                candidates[j, stop + 1] = score
+                ranked = sorted(
+                    ((score, j, stop) for (j, stop), score in candidates.items()), reverse=True
+                )
+                if not ranked:
+                    continue
+                competing = [
+                    candidate
+                    for candidate in ranked[1:]
+                    if not (
+                        ranked[0][1] <= candidate[1]
+                        and ranked[0][2] >= candidate[2]
+                        or candidate[1] <= ranked[0][1]
+                        and candidate[2] >= ranked[0][2]
+                    )
+                ]
+                if competing and ranked[0][0] - competing[0][0] < 0.06:
+                    own_ambiguous, other_ambiguous = (
+                        (ambiguous_b, ambiguous_a) if reverse else (ambiguous_a, ambiguous_b)
+                    )
+                    own_ambiguous.add(element.id)
+                    other_ambiguous.update(
+                        right[k].id
+                        for _, j, stop in (ranked[0], competing[0])
+                        for k in range(j, stop)
+                    )
+                    continue
+                score, j, stop = ranked[0]
+                l_ids, r_ids = [element.id], [e.id for e in right[j:stop]]
+                matches.append(
+                    ElementMatch(
+                        r_ids if reverse else l_ids,
+                        l_ids if reverse else r_ids,
+                        "context_split_merge",
+                        score,
+                    )
+                )
+                occupied_l.add(i)
+                occupied_r.update(range(j, stop))
 
     # Изменённый пункт тоже может быть разделён на несколько абзацев только с одной стороны.
     for left, right, occupied_l, occupied_r, reverse in (

@@ -175,8 +175,7 @@ export class Viewer {
     }
     await this.go(areas[0].page);
     if (this.selected !== difference.id) return;
-    await this.image.decode().catch(() => {});
-    if (this.selected !== difference.id) return;
+    // Высота страницы известна из метаданных: переход не ждёт загрузки растра.
     await new Promise(resolve => requestAnimationFrame(resolve));
     this.drawRegions();
     const viewport = this.root.querySelector('[data-viewport]');
